@@ -1,67 +1,53 @@
-import { z } from "zod";
+import { type Infer, bool, num, obj, oneOf } from "./schema.ts";
 
 export const SETTINGS_KEY = "aether-settings-v2";
 export const LEGACY_SETTINGS_KEY = "aether-v18-settings";
 
-const envMode = z.enum(["indoor", "outdoor", "lowlight", "bright", "through", "noisy", "clutter"]);
+const envMode = oneOf(["indoor", "outdoor", "lowlight", "bright", "through", "noisy", "clutter"] as const);
+const KIND_DEFAULT = { person: true, object: true, wall: true, free: true, traj: true, sonar: true };
 
-export const SettingsSchema = z.object({
-  version: z.literal(2).default(2),
-  dataMode: z.enum(["demo", "real"]).default("demo"),
-  envManual: z.union([z.literal("auto"), envMode]).default("auto"),
-  mapDensity: z.number().min(0.3).max(3).default(1),
-  personOnly: z.boolean().default(false),
-  contourOn: z.boolean().default(true),
-  nightVision: z.boolean().default(false),
-  hdr: z.boolean().default(false),
-  detectOn: z.boolean().default(true),
-  viewPreset: z.enum(["iso", "top", "follow"]).default("iso"),
-  kindFilter: z
-    .object({
-      person: z.boolean().default(true),
-      object: z.boolean().default(true),
-      wall: z.boolean().default(true),
-      free: z.boolean().default(true),
-      traj: z.boolean().default(true),
-      sonar: z.boolean().default(true),
-    })
-    .default({ person: true, object: true, wall: true, free: true, traj: true, sonar: true }),
+export const SettingsSchema = obj({
+  version: num({ def: 2 }),
+  dataMode: oneOf(["demo", "real"] as const, "demo"),
+  envManual: oneOf(["auto", ...envMode.options] as const, "auto"),
+  mapDensity: num({ min: 0.3, max: 3, def: 1 }),
+  personOnly: bool(false),
+  contourOn: bool(true),
+  nightVision: bool(false),
+  hdr: bool(false),
+  detectOn: bool(true),
+  viewPreset: oneOf(["iso", "top", "follow"] as const, "iso"),
+  kindFilter: obj(
+    { person: bool(true), object: bool(true), wall: bool(true), free: bool(true), traj: bool(true), sonar: bool(true) },
+    { def: KIND_DEFAULT },
+  ),
   // vision
-  hfovDeg: z.number().min(40).max(120).default(75),
-  minScore: z.number().min(0.2).max(0.95).default(0.5),
+  hfovDeg: num({ min: 40, max: 120, def: 75 }),
+  minScore: num({ min: 0.2, max: 0.95, def: 0.5 }),
   // sonar
-  sonarTempC: z.number().min(-20).max(50).default(22),
-  sonarSpacingM: z.number().min(0).max(0.3).default(0.06),
-  sonarMaxRangeM: z.number().min(1).max(8).default(5),
-  sonarMinSnrDb: z.number().min(3).max(30).default(8),
-  sonarAverage: z.number().int().min(1).max(5).default(1),
-  sonarGain: z.number().min(0.05).max(1).default(0.8),
-  autoPingSec: z.number().min(1).max(30).default(3),
+  sonarTempC: num({ min: -20, max: 50, def: 22 }),
+  sonarSpacingM: num({ min: 0, max: 0.3, def: 0.06 }),
+  sonarMaxRangeM: num({ min: 1, max: 8, def: 5 }),
+  sonarMinSnrDb: num({ min: 3, max: 30, def: 8 }),
+  sonarAverage: num({ min: 1, max: 5, int: true, def: 1 }),
+  sonarGain: num({ min: 0.05, max: 1, def: 0.8 }),
+  autoPingSec: num({ min: 1, max: 30, def: 3 }),
   // pdr
-  heightM: z.number().min(1).max(2.3).default(1.7),
-  stepLengthM: z.number().min(0.3).max(1.2).default(0.7),
-  cameraHeightM: z.number().min(0.3).max(2.2).default(1.35),
+  heightM: num({ min: 1, max: 2.3, def: 1.7 }),
+  stepLengthM: num({ min: 0.3, max: 1.2, def: 0.7 }),
+  cameraHeightM: num({ min: 0.3, max: 2.2, def: 1.35 }),
 });
 
-export type Settings = z.infer<typeof SettingsSchema>;
+export type Settings = Infer<typeof SettingsSchema>;
 
-export const DEFAULT_SETTINGS: Settings = SettingsSchema.parse({});
+export const DEFAULT_SETTINGS: Settings = SettingsSchema.salvage({}) as Settings;
 
 /** Parse arbitrary stored JSON; unknown / invalid fields fall back to defaults, never throw. */
 export function parseSettings(raw: unknown): Settings {
-  const r = SettingsSchema.safeParse(raw);
-  if (r.success) return r.data;
+  const r = SettingsSchema.parse(raw);
+  if (r.ok) return r.value;
   // field-by-field salvage so a single bad value does not reset everything
-  if (raw && typeof raw === "object") {
-    const salvaged: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-      const one = SettingsSchema.safeParse({ ...salvaged, [k]: v });
-      if (one.success) salvaged[k] = v;
-    }
-    const again = SettingsSchema.safeParse(salvaged);
-    if (again.success) return again.data;
-  }
-  return DEFAULT_SETTINGS;
+  return (SettingsSchema.salvage(raw) as Settings | null) ?? DEFAULT_SETTINGS;
 }
 
 export interface StorageLike {

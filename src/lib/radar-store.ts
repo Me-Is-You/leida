@@ -1,5 +1,5 @@
 import { toast } from "sonner";
-import { create } from "zustand";
+import { createStore } from "./store";
 import { AlertEngine } from "./core/alerts.ts";
 import { estimateDepth, bearingOf, projectToWorld, CLASS_HEIGHT_M, type CameraModel } from "./core/camera-model.ts";
 import { PointCloud, type CloudKind } from "./core/cloud.ts";
@@ -295,7 +295,7 @@ const EMPTY_FUSED: FusedRange = { rangeM: null, sigmaM: null, used: [], rejected
 
 const initialPose: Pose = { x: 0, z: 0, headingDeg: 0, pitchDeg: 0, heightM: initial.cameraHeightM, steps: 0, source: "none" };
 
-export const useRadar = create<RadarState>((set, get) => {
+export const useRadar = createStore<RadarState>((set, get) => {
   function computePose(t: number, s: Settings, mode: DataMode): Pose {
     if (mode === "demo") {
       const hRad = devHeading != null ? (devHeading * Math.PI) / 180 : undefined;

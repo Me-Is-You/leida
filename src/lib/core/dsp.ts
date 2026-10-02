@@ -10,14 +10,53 @@ export function nextPow2(n: number): number {
   return p;
 }
 
-/** In-place iterative radix-2 FFT. `re`/`im` length must be a power of two. */
+/** Cached twiddle + bit-reversal tables for one transform size. */
+export interface FftPlan {
+  n: number;
+  rev: Uint32Array;
+  cos: Float64Array;
+  sin: Float64Array;
+}
+
+const plans = new Map<number, FftPlan>();
+
+/** Plan for size `n` (power of two); tables are built once and reused. */
+export function fftPlan(n: number): FftPlan {
+  let plan = plans.get(n);
+  if (plan) return plan;
+  if (n < 1 || n & (n - 1)) throw new Error("fft length must be a power of two");
+  const rev = new Uint32Array(n);
+  const bits = Math.round(Math.log2(n));
+  for (let i = 0; i < n; i++) {
+    let r = 0;
+    for (let b = 0; b < bits; b++) r |= ((i >> b) & 1) << (bits - 1 - b);
+    rev[i] = r;
+  }
+  const half = Math.max(1, n >> 1);
+  const cos = new Float64Array(half);
+  const sin = new Float64Array(half);
+  // direct evaluation (no recurrence) keeps the twiddles accurate for large n
+  for (let k = 0; k < half; k++) {
+    const a = (-2 * Math.PI * k) / n;
+    cos[k] = Math.cos(a);
+    sin[k] = Math.sin(a);
+  }
+  plan = { n, rev, cos, sin };
+  if (plans.size > 12) plans.clear();
+  plans.set(n, plan);
+  return plan;
+}
+
+/**
+ * In-place iterative radix-2 FFT with table twiddles. `re`/`im` length must
+ * be a power of two. The first two stages are fused into a radix-4 butterfly
+ * (no multiplications), which removes ~25 % of the work for large sizes.
+ */
 export function fft(re: Float64Array, im: Float64Array, inverse = false): void {
   const n = re.length;
-  if (n & (n - 1)) throw new Error("fft length must be a power of two");
-  for (let i = 1, j = 0; i < n; i++) {
-    let bit = n >> 1;
-    for (; j & bit; bit >>= 1) j ^= bit;
-    j ^= bit;
+  const { rev, cos, sin } = fftPlan(n);
+  for (let i = 0; i < n; i++) {
+    const j = rev[i] as number;
     if (i < j) {
       const tr = re[i] as number;
       re[i] = re[j] as number;
@@ -27,33 +66,58 @@ export function fft(re: Float64Array, im: Float64Array, inverse = false): void {
       im[j] = ti;
     }
   }
-  for (let len = 2; len <= n; len <<= 1) {
-    const ang = ((2 * Math.PI) / len) * (inverse ? 1 : -1);
-    const wr = Math.cos(ang);
-    const wi = Math.sin(ang);
+  const sgn = inverse ? -1 : 1;
+  let len = 2;
+  if (n >= 4) {
+    // fused stages len=2 and len=4: twiddles are 1 and ∓j
+    for (let i = 0; i < n; i += 4) {
+      const r0 = re[i] as number, i0 = im[i] as number;
+      const r1 = re[i + 1] as number, i1 = im[i + 1] as number;
+      const r2 = re[i + 2] as number, i2 = im[i + 2] as number;
+      const r3 = re[i + 3] as number, i3 = im[i + 3] as number;
+      const ar = r0 + r1, ai = i0 + i1, br = r0 - r1, bi = i0 - i1;
+      const cr = r2 + r3, ci = i2 + i3;
+      // (r2 - r3, i2 - i3) · (-j·sgn) = sgn·(i2 - i3, -(r2 - r3))
+      const dr = sgn * (i2 - i3), di = -sgn * (r2 - r3);
+      re[i] = ar + cr; im[i] = ai + ci;
+      re[i + 2] = ar - cr; im[i + 2] = ai - ci;
+      re[i + 1] = br + dr; im[i + 1] = bi + di;
+      re[i + 3] = br - dr; im[i + 3] = bi - di;
+    }
+    len = 8;
+  } else if (n === 2) {
+    const r0 = re[0] as number, i0 = im[0] as number;
+    re[0] = r0 + (re[1] as number); im[0] = i0 + (im[1] as number);
+    re[1] = r0 - (re[1] as number); im[1] = i0 - (im[1] as number);
+    len = 4;
+  }
+  for (; len <= n; len <<= 1) {
     const half = len >> 1;
+    const step = n / len;
     for (let i = 0; i < n; i += len) {
-      let cr = 1;
-      let ci = 0;
-      for (let k = 0; k < half; k++) {
+      for (let k = 0, t = 0; k < half; k++, t += step) {
+        const wr = cos[t] as number;
+        const wi = sgn * (sin[t] as number);
         const a = i + k;
         const b = a + half;
-        const tr = (re[b] as number) * cr - (im[b] as number) * ci;
-        const ti = (re[b] as number) * ci + (im[b] as number) * cr;
-        re[b] = (re[a] as number) - tr;
-        im[b] = (im[a] as number) - ti;
-        re[a] = (re[a] as number) + tr;
-        im[a] = (im[a] as number) + ti;
-        const ncr = cr * wr - ci * wi;
-        ci = cr * wi + ci * wr;
-        cr = ncr;
+        const xr = re[b] as number;
+        const xi = im[b] as number;
+        const tr = xr * wr - xi * wi;
+        const ti = xr * wi + xi * wr;
+        const ar = re[a] as number;
+        const ai = im[a] as number;
+        re[b] = ar - tr;
+        im[b] = ai - ti;
+        re[a] = ar + tr;
+        im[a] = ai + ti;
       }
     }
   }
   if (inverse) {
+    const inv = 1 / n;
     for (let i = 0; i < n; i++) {
-      re[i] = (re[i] as number) / n;
-      im[i] = (im[i] as number) / n;
+      re[i] = (re[i] as number) * inv;
+      im[i] = (im[i] as number) * inv;
     }
   }
 }

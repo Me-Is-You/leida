@@ -1,4 +1,5 @@
-import { dbFromRatio, findPeaks, matchedEnvelope, renderChirp, speedOfSound } from "./dsp.ts";
+import { dbFromRatio, findPeaks, renderChirp, speedOfSound } from "./dsp.ts";
+import { matchedFilterFor } from "./matched.ts";
 import { clamp, median } from "./math.ts";
 
 export interface SonarParams {
@@ -80,7 +81,8 @@ export function processEcho(rec: ArrayLike<number>, p: SonarParams): EchoResult 
   if (rec.length < M * 3) return emptyResult("no-direct", "录音太短");
 
   // 1. Locate the direct arrival: strongest matched-filter peak overall.
-  const env0 = matchedEnvelope(rec, p.chirp);
+  const mf = matchedFilterFor(p.chirp as ArrayLike<number> & object, rec.length);
+  const env0 = mf.envelope(rec);
   const floor0 = median(env0) || 1e-12;
   const peaks0 = findPeaks(env0, 1, env0.length - 1, 0, 8);
   const d0 = peaks0[0];
@@ -94,14 +96,11 @@ export function processEcho(rec: ArrayLike<number>, p: SonarParams): EchoResult 
   }
   const lagD = d0.pos;
 
-  // 2. Cancel the direct arrival with a fractionally delayed template.
+  // 2. Cancel the direct arrival in the correlation domain (see matched.ts).
   const amp = templateAmplitude(rec, p, lagD);
-  const tpl = renderChirp(fs, p.chirpBand[0], p.chirpBand[1], p.chirpDuration, lagD, rec.length, amp);
-  const resid = new Float64Array(rec.length);
-  for (let i = 0; i < rec.length; i++) resid[i] = (rec[i] as number) - (tpl[i] as number);
+  const env1 = mf.cancel(lagD, amp);
 
   // 3. Echo search window relative to the direct arrival.
-  const env1 = matchedEnvelope(resid, p.chirp);
   const minLag = Math.ceil(((2 * p.minRangeM - p.spacingM) / c) * fs);
   const maxLag = Math.floor(((2 * p.maxRangeM - p.spacingM) / c) * fs);
   const from = lagD + Math.max(minLag, 24);
@@ -112,11 +111,12 @@ export function processEcho(rec: ArrayLike<number>, p: SonarParams): EchoResult 
 
   // Noise floor: everything except the neighbourhood of the direct arrival.
   const guard = M * 2;
-  const noiseVals: number[] = [];
+  const noiseVals = new Float64Array(Math.ceil(env1.length / 3));
+  let nn = 0;
   for (let i = 0; i < env1.length; i += 3) {
-    if (Math.abs(i - lagD) > guard) noiseVals.push(env1[i] as number);
+    if (Math.abs(i - lagD) > guard) noiseVals[nn++] = env1[i] as number;
   }
-  const floor1 = Math.max(median(noiseVals), 1e-12);
+  const floor1 = Math.max(median(noiseVals.subarray(0, nn)), 1e-12);
 
   const thr = floor1 * Math.pow(10, p.minSnrDb / 20);
   // Cancellation is never perfect on real hardware: inside the chirp length
@@ -163,9 +163,9 @@ export function processEcho(rec: ArrayLike<number>, p: SonarParams): EchoResult 
 
 /** Least-squares amplitude of the unit template at fractional delay `lag`. */
 function templateAmplitude(rec: ArrayLike<number>, p: SonarParams, lag: number): number {
-  const tpl = renderChirp(p.sampleRate, p.chirpBand[0], p.chirpBand[1], p.chirpDuration, lag, rec.length, 1);
   const lo = Math.max(0, Math.floor(lag));
   const hi = Math.min(rec.length, Math.ceil(lag + p.chirp.length) + 1);
+  const tpl = renderChirp(p.sampleRate, p.chirpBand[0], p.chirpBand[1], p.chirpDuration, lag, hi, 1);
   let num = 0;
   let den = 0;
   for (let i = lo; i < hi; i++) {

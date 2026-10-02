@@ -1,427 +1,406 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Grid, OrbitControls } from "@react-three/drei";
-import * as THREE from "three";
-import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
+import { useEffect, useRef, useState } from "react";
 import { CLOUD_KINDS, type CloudKind } from "@/lib/core/cloud.ts";
 import { mulberry32 } from "@/lib/core/math.ts";
+import { rayAabb } from "@/lib/gl/mat4.ts";
+import { OrbitCamera } from "@/lib/gl/orbit.ts";
+import { Batch, BoxBatch, GLRenderer, type PointLayer, type RGBA, hex } from "@/lib/gl/renderer.ts";
 import { AP, ROOM, WALL_X } from "@/lib/engine";
+import { record } from "@/lib/perf";
 import { cloud, effectiveSonar, grid, useRadar } from "@/lib/radar-store";
-import { cn } from "@/lib/utils";
 import type { ViewPreset } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
-const OFFSET: Record<ViewPreset, [number, number, number]> = {
-  iso: [9.5, 10.5, 14.5],
-  top: [0.2, 22, 0.2],
-  follow: [-2.2, 4.8, 9.2],
+/** yaw (rad), elevation (rad), distance (m) for the camera presets. */
+const PRESET: Record<ViewPreset, [number, number, number]> = {
+  iso: [0.58, 0.54, 20.3],
+  top: [0, Math.PI / 2 - 0.02, 22],
+  follow: [0, 0.5, 10.6],
 };
 
-const COLOR: Record<CloudKind, string> = {
-  person: "#8fb4b8",
-  object: "#c7bda3",
-  wall: "#8a909c",
-  free: "#739e85",
-  traj: "#c4a673",
-  sonar: "#b8c7d6",
+const COLOR: Record<CloudKind, RGBA> = {
+  person: hex("#8fb4b8", 0.9),
+  object: hex("#c7bda3", 0.9),
+  wall: hex("#8a909c", 0.85),
+  free: hex("#739e85", 0.8),
+  traj: hex("#c4a673", 0.9),
+  sonar: hex("#b8c7d6", 0.95),
 };
 const SIZE: Record<CloudKind, number> = { person: 0.07, object: 0.07, wall: 0.06, free: 0.05, traj: 0.06, sonar: 0.11 };
+const BG: RGBA = hex("#08090b");
+const TAU = Math.PI * 2;
 
 export function RadarCanvas({ className }: { className?: string }) {
-  const [ready, setReady] = useState(false);
-  const demo = useRadar((s) => s.dataMode === "demo");
-  useEffect(() => setReady(true), []);
-  if (!ready) return <div className={cn("h-full min-h-[280px] bg-bg", className)} />;
+  const wrap = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const box = wrap.current;
+    if (!canvas || !box) return;
+    let renderer: GLRenderer;
+    try {
+      renderer = new GLRenderer(canvas);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "WebGL 初始化失败");
+      return;
+    }
+    const stop = runScene(renderer, canvas, box);
+    return () => {
+      stop();
+      renderer.dispose();
+    };
+  }, []);
+
   return (
-    <div className={cn("relative h-full min-h-[280px] bg-bg", className)}>
-      <Canvas
-        dpr={[1, 1.6]}
-        camera={{ position: OFFSET.iso, fov: 40, near: 0.1, far: 220 }}
-        gl={{ antialias: true, alpha: false, powerPreference: "high-performance" }}
-      >
-        <color attach="background" args={["#08090b"]} />
-        <fog attach="fog" args={["#08090b", 22, 52]} />
-        <ambientLight intensity={0.45} />
-        <directionalLight position={[8, 16, 10]} intensity={0.85} color="#e8ece8" />
-        <hemisphereLight args={["#8fb4b8", "#1a1510", 0.25]} />
-        <Grid
-          args={[40, 40]}
-          cellSize={1}
-          cellThickness={0.6}
-          cellColor="#1c2228"
-          sectionSize={5}
-          sectionThickness={1}
-          sectionColor="#2c343c"
-          fadeDistance={42}
-          fadeStrength={1.4}
-          infiniteGrid
-          position={[0, 0.001, 0]}
-        />
-        <Follow>
-          <RangeRings />
-        </Follow>
-        {demo ? (
-          <>
-            <Walls />
-            <ObjectMarks />
-            <AccessPoint />
-          </>
-        ) : null}
-        <PeopleClouds />
-        {CLOUD_KINDS.map((k) => (
-          <KindCloud key={k} kind={k} />
-        ))}
-        <OccupancyMesh />
-        <Trajectory />
-        <SonarRay />
-        <Observer />
-        <Rig />
-      </Canvas>
+    <div ref={wrap} className={cn("relative h-full min-h-[280px] overflow-hidden bg-bg", className)}>
+      <canvas ref={canvasRef} className="absolute inset-0 h-full w-full touch-none" aria-label="3D 环境图：拖动旋转，双指缩放和平移" />
+      {error ? (
+        <div className="absolute inset-0 grid place-items-center p-6 text-center text-sm text-muted">
+          3D 视图不可用：{error}
+          <br />
+          需要支持 WebGL2 的浏览器。
+        </div>
+      ) : null}
     </div>
   );
 }
 
-/** Moves children with the observer pose (range rings stay centred on the user). */
-function Follow({ children }: { children: React.ReactNode }) {
-  const ref = useRef<THREE.Group>(null);
-  useFrame(() => {
-    const p = useRadar.getState().pose;
-    ref.current?.position.set(p.x, 0, p.z);
-  });
-  return <group ref={ref}>{children}</group>;
-}
+/** Builds the scene, wires gestures and runs the render loop. Returns a disposer. */
+function runScene(r: GLRenderer, canvas: HTMLCanvasElement, box: HTMLElement): () => void {
+  const cam = new OrbitCamera();
+  r.setFog(22, 52);
 
-function Rig() {
-  const preset = useRadar((s) => s.settings.viewPreset);
-  const controls = useRef<OrbitControlsImpl>(null);
-  const { camera } = useThree();
-  const target = useRef(new THREE.Vector3(0, 0.4, 0));
+  // ─ static geometry ───────────────────────────────────────────────
+  const gridB = new Batch();
+  const gMinor = hex("#1c2630", 0.55);
+  const gMajor = hex("#34404c", 0.8);
+  const N = 40;
+  for (let i = -N; i <= N; i++) {
+    const c = i % 5 === 0 ? gMajor : gMinor;
+    gridB.line(i, 0, -N, i, 0, N, c);
+    gridB.line(-N, 0, i, N, 0, i, c);
+  }
+  const ringsB = new Batch();
+  for (const rr of [1, 2, 3, 5]) ringsB.ring(0, 0.02, 0, rr, hex("#8fb4b8", rr === 5 ? 0.3 : 0.18));
 
-  useEffect(() => {
-    const st = useRadar.getState();
-    const c = st.dataMode === "demo" && preset !== "follow" ? new THREE.Vector3(0, 0.4, 0) : new THREE.Vector3(st.pose.x, 0.4, st.pose.z);
-    target.current.copy(c);
-    const o = OFFSET[preset];
-    camera.position.set(c.x + o[0], o[1], c.z + o[2]);
-    camera.lookAt(c);
-    controls.current?.target.copy(c);
-    controls.current?.update();
-  }, [preset, camera]);
+  const wallsB = new BoxBatch(8);
+  const objsB = new BoxBatch(64);
+  const occB = new BoxBatch(3000);
+  const dyn = new Batch();
+  const trajB = new Batch();
 
-  useFrame(() => {
-    const ctl = controls.current;
-    if (!ctl) return;
-    const st = useRadar.getState();
-    const want =
-      st.dataMode === "demo" && st.settings.viewPreset !== "follow"
-        ? new THREE.Vector3(0, 0.4, 0)
-        : new THREE.Vector3(st.pose.x, 0.4, st.pose.z);
-    const delta = want.clone().sub(ctl.target).multiplyScalar(0.08);
-    if (delta.lengthSq() > 1e-8) {
-      ctl.target.add(delta);
-      camera.position.add(delta); // keep the user's orbit offset
+  // person silhouette: 140 points on a lathe + head, reused for every tracked person
+  const rnd = mulberry32(42);
+  const personPts = new Float32Array(180 * 3);
+  for (let i = 0; i < 180; i++) {
+    const h = rnd();
+    const t = rnd() * TAU;
+    if (i >= 140) {
+      const p = rnd() * Math.PI;
+      personPts[i * 3] = Math.sin(p) * Math.cos(t) * 0.18;
+      personPts[i * 3 + 1] = 1.52 + Math.cos(p) * 0.18;
+      personPts[i * 3 + 2] = Math.sin(p) * Math.sin(t) * 0.18;
+    } else {
+      const rad = 0.28 * (0.55 + 0.45 * Math.sin(h * Math.PI));
+      personPts[i * 3] = Math.cos(t) * rad;
+      personPts[i * 3 + 1] = h * 1.55;
+      personPts[i * 3 + 2] = Math.sin(t) * rad;
     }
-  });
+  }
+  const person: PointLayer = { data: personPts, count: 180, version: 1, color: hex("#8fb4b8", 0.9), size: 0.07, additive: true };
 
-  return (
-    <OrbitControls
-      ref={controls}
-      enableDamping
-      dampingFactor={0.08}
-      maxPolarAngle={Math.PI / 2.05}
-      minDistance={2.5}
-      maxDistance={45}
-    />
-  );
-}
+  const marker: PointLayer = { data: new Float32Array(3), count: 1, version: 1, color: hex("#ece8e0", 1), size: 0.26, additive: true };
+  const layers = {} as Record<CloudKind, PointLayer>;
+  for (const k of CLOUD_KINDS) {
+    const ring = cloud.rings[k];
+    layers[k] = { data: ring.pos, count: 0, version: -1, color: COLOR[k], size: SIZE[k] };
+  }
 
-function RangeRings() {
-  return (
-    <group rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.02, 0]}>
-      {[1, 2, 3, 5].map((r) => (
-        <mesh key={r}>
-          <ringGeometry args={[r - 0.012, r + 0.012, 72]} />
-          <meshBasicMaterial color="#8fb4b8" transparent opacity={r === 5 ? 0.22 : 0.12} />
-        </mesh>
-      ))}
-    </group>
-  );
-}
+  r.onRestore = () => {
+    for (const b of [gridB, ringsB, dyn, trajB]) r.forget(b);
+    for (const b of [wallsB, objsB, occB]) r.forget(b);
+    for (const l of [person, marker, ...Object.values(layers)]) r.forget(l);
+    sceneKey = "";
+    occV = -1;
+    trajN = -1;
+  };
 
-function Walls() {
-  return (
-    <group>
-      <mesh position={[WALL_X, ROOM.h / 2, 0]}>
-        <boxGeometry args={[0.08, ROOM.h, ROOM.d]} />
-        <meshStandardMaterial color="#2a3038" transparent opacity={0.28} />
-      </mesh>
-      {[-ROOM.w / 2, ROOM.w / 2].map((x) => (
-        <mesh key={x} position={[x, ROOM.h / 2, 0]}>
-          <boxGeometry args={[0.06, ROOM.h, ROOM.d]} />
-          <meshStandardMaterial color="#1a1e24" transparent opacity={0.22} />
-        </mesh>
-      ))}
-    </group>
-  );
-}
+  // ─ scene state tracked for rebuilds ──────────────────────────────
+  let sceneKey = "";
+  let occV = -1;
+  let occOn = false;
+  let trajN = -1;
+  let preset: ViewPreset | "" = "";
+  let followYawOffset = 0;
+  let lastSig = "";
+  let lastDraw = 0;
+  let lastFrame = 0;
+  let slow = 0;
+  let dprCap = Math.min(window.devicePixelRatio || 1, 1.6);
+  let visible = true;
+  let alive = true;
+  let raf = 0;
+  const t0 = performance.now();
 
-function PeopleClouds() {
-  const geos = useMemo(() => {
-    const rnd = mulberry32(42);
-    return Array.from({ length: 8 }, () => {
-      const n = 180;
-      const pos = new Float32Array(n * 3);
-      for (let i = 0; i < n; i++) {
-        const h = rnd();
-        const t = rnd() * Math.PI * 2;
-        const r = 0.28 * (0.55 + 0.45 * Math.sin(h * Math.PI));
-        if (i > n - 40) {
-          const p = rnd() * Math.PI;
-          pos[i * 3] = Math.sin(p) * Math.cos(t) * 0.18;
-          pos[i * 3 + 1] = 1.52 + Math.cos(p) * 0.18;
-          pos[i * 3 + 2] = Math.sin(p) * Math.sin(t) * 0.18;
-        } else {
-          pos[i * 3] = Math.cos(t) * r;
-          pos[i * 3 + 1] = h * 1.55;
-          pos[i * 3 + 2] = Math.sin(t) * r;
-        }
+  const rebuildScene = (demo: boolean, selected: string | null, objects: ReturnType<typeof useRadar.getState>["objects"]) => {
+    wallsB.clear();
+    objsB.clear();
+    if (demo) {
+      wallsB.add(WALL_X, ROOM.h / 2, 0, 0.08, ROOM.h, ROOM.d, hex("#2a3038", 0.3));
+      for (const x of [-ROOM.w / 2, ROOM.w / 2]) wallsB.add(x, ROOM.h / 2, 0, 0.06, ROOM.h, ROOM.d, hex("#1a1e24", 0.24));
+      for (const o of objects) {
+        const sel = selected === o.id;
+        const c = sel ? hex("#ece8e0", 0.72) : o.metal ? hex("#9aa3a8", 0.5) : hex("#3a3f46", 0.5);
+        objsB.add(o.pos.x, o.size.y / 2, o.pos.z, o.size.x, o.size.y, o.size.z, c);
       }
-      const g = new THREE.BufferGeometry();
-      g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-      return g;
-    });
-  }, []);
-  const refs = useRef<(THREE.Points | null)[]>([]);
+      objsB.add(AP.x, AP.y, AP.z, 0.22, 0.06, 0.16, hex("#7dba9a", 0.95));
+    }
+  };
 
-  useFrame((state) => {
-    const people = useRadar.getState().people;
-    refs.current.forEach((pts, i) => {
-      if (!pts) return;
-      const p = people[i];
-      pts.visible = !!p;
-      if (!p) return;
-      const breathe = p.bpm ? 1 + 0.028 * Math.sin(state.clock.elapsedTime * (p.bpm / 60) * Math.PI * 2) : 1;
-      pts.position.set(p.pos.x, p.pos.y, p.pos.z);
-      pts.scale.set(breathe, 1, breathe);
-      const mat = pts.material as THREE.PointsMaterial;
-      mat.opacity = p.behindWall ? 0.32 : p.source === "device" ? 0.95 : 0.7;
-      mat.color.set(p.source === "device" ? "#7dba9a" : p.behindWall ? "#c4a574" : "#8fb4b8");
-    });
-  });
-
-  return (
-    <group>
-      {geos.map((geo, i) => (
-        <points
-          key={i}
-          ref={(el) => {
-            refs.current[i] = el as unknown as THREE.Points | null;
-          }}
-          geometry={geo}
-          frustumCulled={false}
-        >
-          <pointsMaterial
-            size={0.07}
-            color="#8fb4b8"
-            transparent
-            opacity={0.88}
-            depthWrite={false}
-            blending={THREE.AdditiveBlending}
-            sizeAttenuation
-          />
-        </points>
-      ))}
-    </group>
-  );
-}
-
-function ObjectMarks() {
-  const objects = useRadar((s) => s.objects);
-  const selected = useRadar((s) => s.selectedId);
-  return (
-    <group>
-      {objects.map((o) => (
-        <mesh
-          key={o.id}
-          position={[o.pos.x, o.size.y / 2, o.pos.z]}
-          onClick={(e) => {
-            e.stopPropagation();
-            useRadar.getState().select(o.id);
-          }}
-        >
-          <boxGeometry args={[o.size.x, o.size.y, o.size.z]} />
-          <meshStandardMaterial
-            color={selected === o.id ? "#ece8e0" : o.metal ? "#9aa3a8" : "#3a3f46"}
-            transparent
-            opacity={selected === o.id ? 0.7 : 0.45}
-            metalness={o.metal ? 0.7 : 0.05}
-            roughness={o.metal ? 0.3 : 0.85}
-          />
-        </mesh>
-      ))}
-    </group>
-  );
-}
-
-/**
- * One <points> per kind that reads the ring buffer's Float32Array directly (zero copy).
- * Geometry is only touched when the ring's version changes.
- */
-function KindCloud({ kind }: { kind: CloudKind }) {
-  const ring = cloud.rings[kind];
-  const geo = useMemo(() => {
-    const g = new THREE.BufferGeometry();
-    g.setAttribute("position", new THREE.BufferAttribute(ring.pos, 3).setUsage(THREE.DynamicDrawUsage));
-    g.setDrawRange(0, 0);
-    return g;
-  }, [ring]);
-  const lastV = useRef(-1);
-  const lastOn = useRef(true);
-  const ref = useRef<THREE.Points>(null);
-
-  useFrame(() => {
-    const on = useRadar.getState().settings.kindFilter[kind];
-    if (ref.current) ref.current.visible = on;
-    if (!on) {
-      lastOn.current = false;
+  // ─ gestures ──────────────────────────────────────────────────────
+  const ptrs = new Map<number, { x: number; y: number }>();
+  let downAt = 0;
+  let moved = 0;
+  let lastPinch = 0;
+  const rect = () => canvas.getBoundingClientRect();
+  const onDown = (e: PointerEvent) => {
+    canvas.setPointerCapture(e.pointerId);
+    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (ptrs.size === 1) {
+      downAt = performance.now();
+      moved = 0;
+    }
+    if (ptrs.size === 2) {
+      const [a, b] = [...ptrs.values()] as [{ x: number; y: number }, { x: number; y: number }];
+      lastPinch = Math.hypot(a.x - b.x, a.y - b.y);
+    }
+  };
+  const onMove = (e: PointerEvent) => {
+    const p = ptrs.get(e.pointerId);
+    if (!p) return;
+    const dx = e.clientX - p.x;
+    const dy = e.clientY - p.y;
+    moved += Math.abs(dx) + Math.abs(dy);
+    if (ptrs.size === 1) {
+      const dYaw = -dx * 0.006;
+      cam.rotate(dYaw, dy * 0.005);
+      if (preset === "follow") followYawOffset += dYaw;
+    } else if (ptrs.size === 2) {
+      const before = [...ptrs.values()] as [{ x: number; y: number }, { x: number; y: number }];
+      p.x = e.clientX;
+      p.y = e.clientY;
+      const [a, b] = before;
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (lastPinch > 0 && d > 0) cam.zoom(lastPinch / d);
+      lastPinch = d;
+      cam.pan(dx / 2, dy / 2, rect().height);
       return;
     }
-    if (ring.version === lastV.current && lastOn.current) return;
-    lastV.current = ring.version;
-    lastOn.current = true;
-    geo.setDrawRange(0, ring.size);
-    (geo.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
-    geo.computeBoundingSphere();
-  });
-
-  return (
-    <points ref={ref} geometry={geo} frustumCulled={false}>
-      <pointsMaterial size={SIZE[kind]} color={COLOR[kind]} transparent opacity={0.9} depthWrite={false} sizeAttenuation />
-    </points>
-  );
-}
-
-const MAX_CELLS = 3000;
-
-function OccupancyMesh() {
-  const ref = useRef<THREE.InstancedMesh>(null);
-  const lastV = useRef(-1);
-  const dummy = useMemo(() => new THREE.Object3D(), []);
-  useFrame(() => {
-    const mesh = ref.current;
-    if (!mesh) return;
+    p.x = e.clientX;
+    p.y = e.clientY;
+  };
+  const onUp = (e: PointerEvent) => {
+    ptrs.delete(e.pointerId);
+    lastPinch = 0;
+    if (ptrs.size === 0 && moved < 6 && performance.now() - downAt < 350) pick(e.clientX, e.clientY);
+  };
+  const onWheel = (e: WheelEvent) => {
+    e.preventDefault();
+    cam.zoom(Math.exp(e.deltaY * 0.0012));
+  };
+  const pick = (cx: number, cy: number) => {
+    const b = rect();
+    const ray = cam.pickRay(((cx - b.left) / b.width) * 2 - 1, -(((cy - b.top) / b.height) * 2 - 1), b.width / b.height);
+    if (!ray) return;
     const st = useRadar.getState();
-    mesh.visible = st.meshOn;
-    if (!st.meshOn || grid.version === lastV.current) return;
-    lastV.current = grid.version;
-    const cells = grid.occupiedCells(0.65).slice(0, MAX_CELLS);
-    mesh.count = cells.length;
-    const c = grid.cell;
-    cells.forEach((cell, i) => {
-      const h = 0.1 + (cell.p - 0.65) * 1.2;
-      dummy.position.set(cell.x, h / 2, cell.z);
-      dummy.scale.set(c * 0.92, h, c * 0.92);
-      dummy.updateMatrix();
-      mesh.setMatrixAt(i, dummy.matrix);
-    });
-    mesh.instanceMatrix.needsUpdate = true;
-  });
-  return (
-    <instancedMesh ref={ref} args={[undefined, undefined, MAX_CELLS]} frustumCulled={false}>
-      <boxGeometry args={[1, 1, 1]} />
-      <meshStandardMaterial color="#4d6b60" transparent opacity={0.5} />
-    </instancedMesh>
-  );
-}
-
-function Trajectory() {
-  const geo = useMemo(() => {
-    const g = new THREE.BufferGeometry();
-    g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(3000 * 3), 3));
-    g.setDrawRange(0, 0);
-    return g;
-  }, []);
-  const obj = useMemo(() => {
-    const l = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: "#c4a574", transparent: true, opacity: 0.8 }));
-    l.frustumCulled = false;
-    return l;
-  }, [geo]);
-  const last = useRef(-1);
-  useFrame(() => {
-    const tr = useRadar.getState().trajectory;
-    if (tr.length === last.current) return;
-    last.current = tr.length;
-    const attr = geo.getAttribute("position") as THREE.BufferAttribute;
-    const n = Math.min(tr.length, 3000);
-    for (let i = 0; i < n; i++) {
-      const p = tr[i] as { x: number; z: number };
-      attr.setXYZ(i, p.x, 0.06, p.z);
+    if (st.dataMode !== "demo") return;
+    let best: { id: string; t: number } | null = null;
+    for (const o of st.objects) {
+      const t = rayAabb(
+        ...ray.o,
+        ...ray.d,
+        [o.pos.x - o.size.x / 2, 0, o.pos.z - o.size.z / 2],
+        [o.pos.x + o.size.x / 2, o.size.y, o.pos.z + o.size.z / 2],
+      );
+      if (t !== null && (!best || t < best.t)) best = { id: o.id, t };
     }
-    attr.needsUpdate = true;
-    geo.setDrawRange(0, n);
-    geo.computeBoundingSphere();
-  });
-  return (
-    <primitive object={obj} />
-  );
-}
+    st.select(best ? (st.selectedId === best.id ? null : best.id) : null);
+  };
+  canvas.addEventListener("pointerdown", onDown);
+  canvas.addEventListener("pointermove", onMove);
+  canvas.addEventListener("pointerup", onUp);
+  canvas.addEventListener("pointercancel", onUp);
+  canvas.addEventListener("wheel", onWheel, { passive: false });
 
-function SonarRay() {
-  const ref = useRef<THREE.Mesh>(null);
-  useFrame(() => {
-    const m = ref.current;
-    if (!m) return;
+  const io = new IntersectionObserver((es) => {
+    visible = es[es.length - 1]?.isIntersecting ?? true;
+  });
+  io.observe(box);
+
+  // ─ frame ─────────────────────────────────────────────────────────
+  const frame = (now: number) => {
+    if (!alive) return;
+    raf = requestAnimationFrame(frame);
+    if (!visible || document.hidden) return;
+    const dt = (now - lastFrame) / 1000;
+    if (now - lastDraw < 32 && lastDraw !== 0) return; // ≤ 30 fps
+    lastFrame = now;
+
     const st = useRadar.getState();
-    const s = effectiveSonar(st);
-    const d = s?.distM ?? null;
-    m.visible = d !== null;
-    if (d === null) return;
-    const h = (st.pose.headingDeg * Math.PI) / 180;
-    m.scale.set(1, 1, d);
-    m.position.set(st.pose.x + Math.sin(h) * (d / 2), st.pose.heightM - 0.2, st.pose.z + Math.cos(h) * (d / 2));
-    m.rotation.set(0, h, 0);
-    (m.material as THREE.MeshBasicMaterial).color.set(s?.source === "device" ? "#7dba9a" : "#8fb4b8");
-  });
-  return (
-    <mesh ref={ref} visible={false}>
-      <boxGeometry args={[0.03, 0.03, 1]} />
-      <meshBasicMaterial color="#8fb4b8" transparent opacity={0.5} />
-    </mesh>
-  );
-}
+    const demo = st.dataMode === "demo";
+    const pose = st.pose;
+    const want = st.settings.viewPreset;
 
-function Observer() {
-  const body = useRef<THREE.Mesh>(null);
-  const wedge = useRef<THREE.Group>(null);
-  useFrame(() => {
-    const p = useRadar.getState().pose;
-    body.current?.position.set(p.x, p.heightM, p.z);
-    if (wedge.current) {
-      wedge.current.position.set(p.x, 0.05, p.z);
-      wedge.current.rotation.y = (p.headingDeg * Math.PI) / 180;
+    // camera presets & target following
+    const followPose = !demo || want === "follow";
+    if (want !== preset) {
+      preset = want;
+      followYawOffset = 0;
+      const [yaw, elev, dist] = PRESET[want];
+      cam.set(yaw, elev, dist, followPose ? pose.x : 0, followPose ? pose.z : 0);
     }
-  });
-  return (
-    <>
-      <mesh ref={body}>
-        <sphereGeometry args={[0.12, 16, 16]} />
-        <meshStandardMaterial color="#ece8e0" emissive="#8fb4b8" emissiveIntensity={0.6} />
-      </mesh>
-      {/* heading wedge on the floor: apex points along the camera heading */}
-      <group ref={wedge}>
-        <mesh position={[0, 0, 0.55]} rotation={[Math.PI / 2, 0, 0]}>
-          <coneGeometry args={[0.4, 1.1, 3]} />
-          <meshBasicMaterial color="#8fb4b8" transparent opacity={0.28} />
-        </mesh>
-      </group>
-    </>
-  );
-}
+    cam.gtx += ((followPose ? pose.x : 0) - cam.gtx) * 0.12;
+    cam.gtz += ((followPose ? pose.z : 0) - cam.gtz) * 0.12;
+    if (want === "follow" && ptrs.size === 0) {
+      const base = (pose.headingDeg * Math.PI) / 180 + Math.PI + followYawOffset;
+      cam.gYaw = base + TAU * Math.round((cam.gYaw - base) / TAU);
+    }
+    const camMoving = cam.update(Math.max(dt, 1 / 60));
 
-function AccessPoint() {
-  return (
-    <mesh position={[AP.x, AP.y, AP.z]}>
-      <boxGeometry args={[0.22, 0.06, 0.16]} />
-      <meshStandardMaterial color="#7dba9a" emissive="#7dba9a" emissiveIntensity={0.4} />
-    </mesh>
-  );
+    // cheap change detection → skip the draw when nothing visible changed
+    const sonar = effectiveSonar(st);
+    const sig = `${cloud.version}|${grid.version}|${pose.x.toFixed(2)}|${pose.z.toFixed(2)}|${pose.headingDeg.toFixed(0)}|${sonar?.distM ?? "-"}|${st.selectedId}|${st.meshOn}|${st.trajectory.length}|${st.people.length}|${demo}|${JSON.stringify(st.settings.kindFilter)}`;
+    if (!camMoving && !demo && sig === lastSig && now - lastDraw < 1000 && lastDraw !== 0 && ptrs.size === 0) return;
+    lastSig = sig;
+    lastDraw = now;
+    const tStart = performance.now();
+
+    // size & dpr (adaptive: drop resolution when frames are consistently slow)
+    const b = box.getBoundingClientRect();
+    r.resize(b.width, b.height, dprCap, cam.fov);
+
+    const key = `${demo}|${st.selectedId}|${st.objects.length}`;
+    if (key !== sceneKey) {
+      sceneKey = key;
+      rebuildScene(demo, st.selectedId, st.objects);
+    }
+
+    const kf = st.settings.kindFilter;
+    r.begin(cam.viewProj(Math.max(0.1, b.width / Math.max(1, b.height))), BG);
+    // grid snaps to whole metres around the target so it feels infinite
+    r.drawBatch(gridB, Math.round(cam.tx), 0, Math.round(cam.tz));
+    r.drawBatch(ringsB, pose.x, 0, pose.z);
+    if (demo) {
+      r.drawBoxes(wallsB);
+      r.drawBoxes(objsB);
+    }
+
+    // occupancy cells
+    if (st.meshOn) {
+      if (!occOn || grid.version !== occV) {
+        occOn = true;
+        occV = grid.version;
+        occB.clear();
+        const c = grid.cell;
+        const cells = grid.occupiedCells(0.65);
+        for (let i = 0; i < cells.length && i < 3000; i++) {
+          const cell = cells[i] as { x: number; z: number; p: number };
+          const h = 0.1 + (cell.p - 0.65) * 1.2;
+          occB.add(cell.x, h / 2, cell.z, c * 0.92, h, c * 0.92, hex("#4d6b60", 0.55));
+        }
+      }
+      r.drawBoxes(occB);
+    } else occOn = false;
+
+    // clouds (zero-copy from the ring buffers; re-uploaded only on version change)
+    for (const k of CLOUD_KINDS) {
+      if (!kf[k]) continue;
+      const ring = cloud.rings[k];
+      const l = layers[k];
+      l.count = ring.size;
+      l.version = ring.version;
+      r.drawPoints(l);
+    }
+
+    // tracked people silhouettes
+    const tSec = (now - t0) / 1000;
+    for (let i = 0; i < Math.min(8, st.people.length); i++) {
+      const p = st.people[i];
+      if (!p) continue;
+      const br = p.bpm ? 1 + 0.028 * Math.sin(tSec * (p.bpm / 60) * TAU) : 1;
+      person.offset = [p.pos.x, p.pos.y, p.pos.z];
+      person.scale = [br, 1, br];
+      person.color = p.source === "device" ? hex("#7dba9a", 0.95) : p.behindWall ? hex("#c4a574", 0.32) : hex("#8fb4b8", 0.7);
+      r.drawPoints(person);
+    }
+
+    // trajectory polyline
+    if (kf.traj !== false) {
+      const tr = st.trajectory;
+      if (tr.length !== trajN) {
+        trajN = tr.length;
+        trajB.clear();
+        const c = hex("#c4a574", 0.85);
+        for (let i = 1; i < Math.min(tr.length, 3000); i++) {
+          const a = tr[i - 1] as { x: number; z: number };
+          const p = tr[i] as { x: number; z: number };
+          trajB.line(a.x, 0.06, a.z, p.x, 0.06, p.z, c);
+        }
+      }
+      r.drawBatch(trajB);
+    }
+
+    // observer: heading wedge on the floor, marker, sonar ray
+    dyn.clear();
+    const h = (pose.headingDeg * Math.PI) / 180;
+    const fx = Math.sin(h);
+    const fz = Math.cos(h);
+    const rx = fz;
+    const rz = -fx;
+    const wc = hex("#8fb4b8", 0.28);
+    dyn.tri(
+      pose.x + fx * 1.1, 0.05, pose.z + fz * 1.1,
+      pose.x - rx * 0.4, 0.05, pose.z - rz * 0.4,
+      pose.x + rx * 0.4, 0.05, pose.z + rz * 0.4,
+      wc,
+    );
+    const edge = hex("#8fb4b8", 0.7);
+    dyn.line(pose.x, 0.06, pose.z, pose.x + fx * 1.1, 0.06, pose.z + fz * 1.1, edge);
+    dyn.line(pose.x, 0.0, pose.z, pose.x, pose.heightM, pose.z, hex("#ece8e0", 0.35));
+    const d = sonar?.distM ?? null;
+    if (d !== null) {
+      const c = sonar?.source === "device" ? hex("#7dba9a", 0.6) : hex("#8fb4b8", 0.5);
+      const y = pose.heightM - 0.2;
+      const ex = pose.x + fx * d;
+      const ez = pose.z + fz * d;
+      const w = 0.03;
+      dyn.quad(pose.x - rx * w, y, pose.z - rz * w, pose.x + rx * w, y, pose.z + rz * w, ex + rx * w, y, ez + rz * w, ex - rx * w, y, ez - rz * w, c);
+      dyn.quad(pose.x, y - w, pose.z, pose.x, y + w, pose.z, ex, y + w, ez, ex, y - w, ez, c);
+    }
+    r.drawBatch(dyn);
+    marker.offset = [pose.x, pose.heightM, pose.z];
+    r.drawPoints(marker);
+
+    const ms = performance.now() - tStart;
+    record("render.3d", ms);
+    // frame pacing: if the draw is consistently > 12 ms, lower the pixel ratio (floor 1.0)
+    slow = ms > 12 ? Math.min(slow + 1, 120) : Math.max(slow - 1, 0);
+    if (slow > 90 && dprCap > 1) {
+      dprCap = Math.max(1, dprCap - 0.25);
+      slow = 0;
+    }
+  };
+  raf = requestAnimationFrame(frame);
+
+  return () => {
+    alive = false;
+    cancelAnimationFrame(raf);
+    io.disconnect();
+    canvas.removeEventListener("pointerdown", onDown);
+    canvas.removeEventListener("pointermove", onMove);
+    canvas.removeEventListener("pointerup", onUp);
+    canvas.removeEventListener("pointercancel", onUp);
+    canvas.removeEventListener("wheel", onWheel);
+  };
 }
