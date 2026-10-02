@@ -1,0 +1,23 @@
+import chromium from "@sparticuz/chromium";
+import { chromium as pw } from "playwright-core";
+const base = process.env.BASE || "http://localhost:8080";
+const b = await pw.launch({ executablePath: await chromium.executablePath(), headless: true,
+  args: ["--no-sandbox","--use-gl=angle","--use-angle=swiftshader","--enable-unsafe-swiftshader","--ignore-gpu-blocklist","--use-fake-ui-for-media-stream","--use-fake-device-for-media-stream","--autoplay-policy=no-user-gesture-required"] });
+const ctx = await b.newContext({ viewport: { width: 420, height: 900 }, permissions: ["camera","microphone"] });
+const p = await ctx.newPage();
+const errs = [];
+p.on("pageerror", (e) => errs.push("PAGEERR " + e.message.slice(0, 300)));
+p.on("console", (m) => { if (m.type() === "error") errs.push("CONSOLE " + m.text().slice(0, 200)); });
+await p.goto(base + "/vision", { waitUntil: "load" });
+await p.waitForTimeout(1500);
+await p.getByRole("button", { name: /开启相机/ }).click();
+await p.waitForTimeout(Number(process.env.WAIT || 9000));
+console.log("BTN", await p.evaluate(() => [...document.querySelectorAll("button")].map(b=>b.innerText).join("|")));
+console.log("VIDEO", await p.evaluate(() => [...document.querySelectorAll("video")].map(v=>v.readyState+":"+v.videoWidth).join(",")));
+await p.screenshot({ path: `/home/user/browser/vision${process.env.TAG || ""}.png` });
+await p.getByRole("link", { name: /硬件/ }).first().click();
+await p.waitForTimeout(1800);
+const rows = await p.evaluate(() => [...document.querySelectorAll("table tbody tr")].map((r) => r.innerText.replace(/\s+/g, " ")));
+console.log(rows.join("\n"));
+console.log("ERR", errs.filter((e) => !/ERR_CONNECTION_CLOSED/.test(e)));
+await b.close();

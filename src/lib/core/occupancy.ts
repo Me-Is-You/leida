@@ -1,11 +1,20 @@
-/** Sparse log-odds occupancy grid (2-D, x/z) updated by range rays. */
+/**
+ * Sparse log-odds occupancy grid (2-D, x/z) updated by range rays. Cells live
+ * in an open-addressing hash table over typed arrays (grown by doubling), so
+ * ray integration allocates nothing.
+ */
 export class OccupancyGrid {
   readonly cell: number;
-  private readonly l = new Map<number, number>();
   private readonly lFree: number;
   private readonly lOcc: number;
   private readonly lMin = -4;
   private readonly lMax = 5;
+  private kx = new Int32Array(1024);
+  private kz = new Int32Array(1024);
+  private lv = new Float32Array(1024);
+  private used = new Uint8Array(1024);
+  private mask = 1023;
+  private n = 0;
   version = 0;
 
   constructor(cell = 0.25, pFree = 0.35, pOcc = 0.72) {
@@ -14,14 +23,52 @@ export class OccupancyGrid {
     this.lOcc = Math.log(pOcc / (1 - pOcc));
   }
 
-  private key(ix: number, iz: number): number {
-    return (ix + 32768) * 65536 + (iz + 32768);
+  private slot(ix: number, iz: number): number {
+    let h = Math.imul(ix, 0x9e3779b1) ^ Math.imul(iz, 0x85ebca6b);
+    h ^= h >>> 15;
+    h = Math.imul(h, 0x2c1b3c6d);
+    h ^= h >>> 13;
+    let i = h & this.mask;
+    while (this.used[i]) {
+      if (this.kx[i] === ix && this.kz[i] === iz) return i;
+      i = (i + 1) & this.mask;
+    }
+    return ~i;
+  }
+
+  private grow() {
+    const { kx, kz, lv, used } = this;
+    const size = (this.mask + 1) * 2;
+    this.kx = new Int32Array(size);
+    this.kz = new Int32Array(size);
+    this.lv = new Float32Array(size);
+    this.used = new Uint8Array(size);
+    this.mask = size - 1;
+    for (let i = 0; i < used.length; i++) {
+      if (!used[i]) continue;
+      const j = ~this.slot(kx[i] as number, kz[i] as number);
+      this.kx[j] = kx[i] as number;
+      this.kz[j] = kz[i] as number;
+      this.lv[j] = lv[i] as number;
+      this.used[j] = 1;
+    }
   }
 
   private bump(ix: number, iz: number, d: number) {
-    const k = this.key(ix, iz);
-    const v = Math.max(this.lMin, Math.min(this.lMax, (this.l.get(k) ?? 0) + d));
-    this.l.set(k, v);
+    let i = this.slot(ix, iz);
+    if (i < 0) {
+      if ((this.n + 1) * 2 > this.mask + 1) {
+        this.grow();
+        i = this.slot(ix, iz);
+      }
+      i = ~i;
+      this.kx[i] = ix;
+      this.kz[i] = iz;
+      this.lv[i] = 0;
+      this.used[i] = 1;
+      this.n++;
+    }
+    this.lv[i] = Math.max(this.lMin, Math.min(this.lMax, (this.lv[i] as number) + d));
   }
 
   /**
@@ -68,29 +115,33 @@ export class OccupancyGrid {
   }
 
   probability(x: number, z: number): number | null {
-    const v = this.l.get(this.key(Math.floor(x / this.cell), Math.floor(z / this.cell)));
-    return v === undefined ? null : 1 / (1 + Math.exp(-v));
+    const i = this.slot(Math.floor(x / this.cell), Math.floor(z / this.cell));
+    return i < 0 ? null : 1 / (1 + Math.exp(-(this.lv[i] as number)));
+  }
+
+  /** Visit every cell with P(occupied) ≥ pMin without allocating. */
+  forEachOccupied(pMin: number, fn: (x: number, z: number, p: number) => void) {
+    const lMinOdds = Math.log(pMin / (1 - pMin));
+    for (let i = 0; i < this.used.length; i++) {
+      if (!this.used[i] || (this.lv[i] as number) < lMinOdds) continue;
+      fn(((this.kx[i] as number) + 0.5) * this.cell, ((this.kz[i] as number) + 0.5) * this.cell, 1 / (1 + Math.exp(-(this.lv[i] as number))));
+    }
   }
 
   occupiedCells(pMin = 0.65): { x: number; z: number; p: number }[] {
     const out: { x: number; z: number; p: number }[] = [];
-    for (const [k, v] of this.l) {
-      const p = 1 / (1 + Math.exp(-v));
-      if (p < pMin) continue;
-      const ix = Math.floor(k / 65536) - 32768;
-      const iz = (k % 65536) - 32768;
-      out.push({ x: (ix + 0.5) * this.cell, z: (iz + 0.5) * this.cell, p });
-    }
+    this.forEachOccupied(pMin, (x, z, p) => out.push({ x, z, p }));
     return out;
   }
 
   /** Number of cells with any evidence, and the area they cover (m²). */
   explored(): { cells: number; areaM2: number } {
-    return { cells: this.l.size, areaM2: this.l.size * this.cell * this.cell };
+    return { cells: this.n, areaM2: this.n * this.cell * this.cell };
   }
 
   clear() {
-    this.l.clear();
+    this.used.fill(0);
+    this.n = 0;
     this.version++;
   }
 }

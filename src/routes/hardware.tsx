@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { PageHeader } from "@/components/panels/page-header";
+import { PerfTable } from "@/components/panels/perf-table";
 import { Metric } from "@/components/panels/metric";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -92,6 +93,8 @@ function HardwarePage() {
           ))}
         </ul>
       </Card>
+
+      <PerfTable />
 
       <Card>
         <CardHeader>

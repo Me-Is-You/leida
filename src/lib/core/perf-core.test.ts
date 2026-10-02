@@ -104,3 +104,92 @@ test("schema: defaults, bounds, optional keys, stripping and salvage", () => {
   assert.deepEqual(S.salvage({ a: 99, c: "q", b: 3 }), { a: 5, b: 3, c: "x", l: [] });
   assert.equal(obj({ need: num() }).salvage({}), null);
 });
+
+import { PointRing } from "./cloud.ts";
+
+test("PointRing hash index behaves exactly like a Map-backed reference (eviction, refresh, clear)", () => {
+  class Ref {
+    cap: number;
+    v: number;
+    keys: (string | null)[];
+    idx = new Map<string, number>();
+    pos: number[][];
+    head = 0;
+    size = 0;
+    constructor(cap: number, v: number) {
+      this.cap = cap;
+      this.v = v;
+      this.keys = new Array(cap).fill(null);
+      this.pos = Array.from({ length: cap }, () => [0, 0, 0]);
+    }
+    add(x: number, y: number, z: number) {
+      const k = `${Math.round(x / this.v)},${Math.round(y / this.v)},${Math.round(z / this.v)}`;
+      const h = this.idx.get(k);
+      if (h !== undefined) {
+        const p = this.pos[h]!;
+        p[0] = p[0]! * 0.8 + x * 0.2;
+        p[1] = p[1]! * 0.8 + y * 0.2;
+        p[2] = p[2]! * 0.8 + z * 0.2;
+        return false;
+      }
+      const old = this.keys[this.head];
+      if (old) this.idx.delete(old);
+      this.keys[this.head] = k;
+      this.idx.set(k, this.head);
+      this.pos[this.head] = [x, y, z];
+      this.head = (this.head + 1) % this.cap;
+      this.size = Math.min(this.size + 1, this.cap);
+      return true;
+    }
+  }
+  const rnd = mulberry32(99);
+  for (const cap of [7, 64, 500]) {
+    const a = new PointRing(cap, 0.1);
+    const b = new Ref(cap, 0.1);
+    for (let i = 0; i < 6000; i++) {
+      // clustered coordinates → plenty of collisions and revisits
+      const x = Math.round(rnd() * 30) * 0.1 + (rnd() - 0.5) * 0.04;
+      const y = Math.round(rnd() * 12) * 0.1;
+      const z = Math.round(rnd() * 30) * 0.1 - 1.5;
+      assert.equal(a.add(x, y, z, i), b.add(x, y, z), `cap=${cap} i=${i}`);
+    }
+    assert.equal(a.size, b.size);
+    for (let i = 0; i < a.size; i++) for (let k = 0; k < 3; k++) assert.ok(Math.abs(a.pos[i * 3 + k]! - b.pos[i]![k]!) < 1e-5);
+  }
+  const r = new PointRing(10, 0.1);
+  r.add(1, 1, 1);
+  r.clear();
+  assert.equal(r.size, 0);
+  assert.equal(r.add(1, 1, 1), true);
+});
+
+import { OccupancyGrid } from "./occupancy.ts";
+import { OccupancyGrid as RefGrid } from "./fixtures/occupancy-ref.ts";
+
+test("OccupancyGrid hash table matches the Map-based reference (incl. growth)", () => {
+  const rnd = mulberry32(5);
+  const a = new OccupancyGrid(0.1);
+  const b = new RefGrid(0.1);
+  for (let i = 0; i < 1500; i++) {
+    const ang = rnd() * Math.PI * 2;
+    const r = 0.5 + rnd() * 6;
+    const ox = (rnd() - 0.5) * 4;
+    const oz = (rnd() - 0.5) * 4;
+    const hit = rnd() > 0.2;
+    a.integrateRay(ox, oz, ox + Math.cos(ang) * r, oz + Math.sin(ang) * r, hit);
+    b.integrateRay(ox, oz, ox + Math.cos(ang) * r, oz + Math.sin(ang) * r, hit);
+    if (i % 400 === 0) {
+      a.markOccupied(ox, oz);
+      b.markOccupied(ox, oz);
+    }
+  }
+  assert.equal(a.explored().cells, b.explored().cells);
+  const key = (c: { x: number; z: number; p: number }) => `${c.x.toFixed(3)},${c.z.toFixed(3)},${c.p.toFixed(4)}`;
+  const ca = a.occupiedCells(0.6).map(key).sort();
+  const cb = b.occupiedCells(0.6).map(key).sort();
+  assert.deepEqual(ca, cb);
+  assert.ok(ca.length > 20);
+  assert.equal(a.probability(99, 99), null);
+  a.clear();
+  assert.equal(a.explored().cells, 0);
+});

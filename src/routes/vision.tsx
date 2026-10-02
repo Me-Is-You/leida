@@ -91,7 +91,11 @@ function VisionPage() {
       c.getContext("2d")?.drawImage(v, 0, 0, c.width, c.height);
       const r = await runOcr(c, ocrLang);
       setOcr({ ...r, t: Date.now() });
-      setOcrMsg(r.text ? "" : "没有识别到文字。让文字占满画面、光线充足、避免反光。");
+      setOcrMsg(
+        r.text
+          ? `定位到 ${r.lines} 行文字区域 · ${r.enhanced ? "已裁剪并自适应二值化" : "使用原图（预处理结果更差）"}`
+          : "没有识别到文字。让文字占满画面、光线充足、避免反光。",
+      );
       pushLog(`OCR ${r.text.length} 字 · 置信 ${r.confidence.toFixed(0)}%`, "INFO");
     } catch (e) {
       setOcrMsg(`OCR 失败：${e instanceof Error ? e.message : String(e)}`);
@@ -260,7 +264,7 @@ function VisionPage() {
         <Card>
           <CardHeader>
             <CardTitle>文字识别 OCR</CardTitle>
-            <CardHint>Tesseract · 本地</CardHint>
+            <CardHint>自研预处理 + Tesseract 识字</CardHint>
           </CardHeader>
           <div className="flex flex-wrap items-center gap-2">
             <Button size="sm" onClick={() => void doOcr()} disabled={!cameraOn || ocrBusy}>

@@ -1,3 +1,5 @@
+import { prepareForOcr } from "./ocr-prep.ts";
+import { record } from "./perf.ts";
 import type { ObjectKind } from "./types";
 
 const COCO_KIND: Record<string, ObjectKind> = {
@@ -148,8 +150,8 @@ export function ocrBusyNow() {
 export async function runOcr(
   canvas: HTMLCanvasElement,
   lang: "eng" | "chi_sim+eng",
-): Promise<{ text: string; confidence: number }> {
-  if (ocrBusy) return { text: "", confidence: 0 };
+): Promise<{ text: string; confidence: number; lines: number; enhanced: boolean }> {
+  if (ocrBusy) return { text: "", confidence: 0, lines: 0, enhanced: false };
   ocrBusy = true;
   try {
     if (!ocrWorker || ocrLang !== lang) {
@@ -163,8 +165,22 @@ export async function runOcr(
       })) as unknown as OcrWorker;
       ocrLang = lang;
     }
-    const r = await ocrWorker.recognize(canvas);
-    return { text: (r.data.text || "").trim(), confidence: r.data.confidence ?? 0 };
+    // own pre-processing first (crop to text lines, Sauvola); if it reads poorly, retry on the untouched frame and keep the better one
+    const prep = prepareForOcr(canvas);
+    if (prep) record("ocr.prep", prep.ms);
+    const t0 = performance.now();
+    const pick = (r: { data: { text: string; confidence: number } }) => ({ text: (r.data.text || "").trim(), confidence: r.data.confidence ?? 0 });
+    let best = pick(await ocrWorker.recognize(prep ? prep.canvas : canvas));
+    let enhanced = !!prep;
+    if (prep && (best.text.length < 3 || best.confidence < 45)) {
+      const raw = pick(await ocrWorker.recognize(canvas));
+      if (raw.text.length > best.text.length * 0.8 && raw.confidence >= best.confidence) {
+        best = raw;
+        enhanced = false;
+      }
+    }
+    record("ocr.recognize", performance.now() - t0);
+    return { ...best, lines: prep?.lines ?? 0, enhanced };
   } finally {
     ocrBusy = false;
   }

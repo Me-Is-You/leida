@@ -303,12 +303,11 @@ function runScene(r: GLRenderer, canvas: HTMLCanvasElement, box: HTMLElement): (
         occV = grid.version;
         occB.clear();
         const c = grid.cell;
-        const cells = grid.occupiedCells(0.65);
-        for (let i = 0; i < cells.length && i < 3000; i++) {
-          const cell = cells[i] as { x: number; z: number; p: number };
-          const h = 0.1 + (cell.p - 0.65) * 1.2;
-          occB.add(cell.x, h / 2, cell.z, c * 0.92, h, c * 0.92, hex("#4d6b60", 0.55));
-        }
+        const col = hex("#4d6b60", 0.55);
+        grid.forEachOccupied(0.65, (x, z, p) => {
+          const h = 0.1 + (p - 0.65) * 1.2;
+          occB.add(x, h / 2, z, c * 0.92, h, c * 0.92, col);
+        });
       }
       r.drawBoxes(occB);
     } else occOn = false;

@@ -1,18 +1,12 @@
 import { renderChirp } from "./core/dsp.ts";
-import { aggregateEchoes, processEcho, TRACE_BINS, type EchoResult, type SonarParams } from "./core/sonar-core.ts";
+import { aggregateEchoes, TRACE_BINS, type EchoResult } from "./core/sonar-core.ts";
+import { CHIRP_BAND, CHIRP_DURATION, chirpFor, type SonarConfig } from "./core/sonar-params.ts";
+import { record, timedAsync } from "./perf";
+import { disposeSonarWorker, processEchoAsync } from "./sonar-client";
 import type { SonarPing } from "./types";
 
-export interface SonarConfig {
-  tempC: number;
-  spacingM: number;
-  maxRangeM: number;
-  minSnrDb: number;
-  average: number;
-  gain: number;
-}
-
-export const CHIRP_BAND: [number, number] = [18000, 21500];
-export const CHIRP_DURATION = 0.045;
+export type { SonarConfig };
+export { CHIRP_BAND, CHIRP_DURATION };
 const RECORD_S = 0.55;
 /** Chirp is scheduled this long after the recording starts (headroom for output latency). */
 const LEAD_S = 0.08;
@@ -26,20 +20,6 @@ let workletReady: Promise<void> | null = null;
 
 export function sonarBusy() {
   return busy;
-}
-
-function buildParams(fs: number, cfg: SonarConfig): SonarParams {
-  return {
-    sampleRate: fs,
-    chirp: renderChirp(fs, CHIRP_BAND[0], CHIRP_BAND[1], CHIRP_DURATION, 0, undefined, cfg.gain),
-    chirpBand: CHIRP_BAND,
-    chirpDuration: CHIRP_DURATION,
-    tempC: cfg.tempC,
-    maxRangeM: cfg.maxRangeM,
-    minRangeM: 0.12,
-    spacingM: cfg.spacingM,
-    minSnrDb: cfg.minSnrDb,
-  };
 }
 
 async function ensureGraph(): Promise<{ ctx: AudioContext; node: AudioWorkletNode; micRaw: boolean }> {
@@ -82,7 +62,20 @@ async function ensureGraph(): Promise<{ ctx: AudioContext; node: AudioWorkletNod
   return { ctx, node, micRaw };
 }
 
-function recordOnce(c: AudioContext, n: AudioWorkletNode, chirp: Float64Array | ArrayLike<number>): Promise<Float32Array> {
+let chirpBuf: { key: string; buf: AudioBuffer } | null = null;
+
+function chirpBuffer(c: AudioContext, gain: number): AudioBuffer {
+  const key = `${c.sampleRate}|${gain.toFixed(3)}`;
+  if (chirpBuf?.key === key) return chirpBuf.buf;
+  const chirp = chirpFor(c.sampleRate, gain);
+  const buf = c.createBuffer(1, chirp.length, c.sampleRate);
+  const ch = buf.getChannelData(0);
+  for (let i = 0; i < chirp.length; i++) ch[i] = chirp[i] as number;
+  chirpBuf = { key, buf };
+  return buf;
+}
+
+function recordOnce(c: AudioContext, n: AudioWorkletNode, gain: number): Promise<Float32Array> {
   return new Promise((resolve, reject) => {
     const frames = Math.round(c.sampleRate * RECORD_S);
     const timer = window.setTimeout(() => {
@@ -96,11 +89,8 @@ function recordOnce(c: AudioContext, n: AudioWorkletNode, chirp: Float64Array | 
       resolve(e.data.samples);
     };
     n.port.postMessage({ cmd: "start", frames });
-    const buf = c.createBuffer(1, chirp.length, c.sampleRate);
-    const ch = buf.getChannelData(0);
-    for (let i = 0; i < chirp.length; i++) ch[i] = chirp[i] as number;
     const src = c.createBufferSource();
-    src.buffer = buf;
+    src.buffer = chirpBuffer(c, gain);
     src.connect(c.destination);
     src.start(c.currentTime + LEAD_S);
   });
@@ -159,15 +149,19 @@ function errorPing(message: string): SonarPing {
 export async function pingSonar(cfg: SonarConfig): Promise<SonarPing> {
   if (busy) return errorPing("上一次脉冲尚未结束");
   busy = true;
+  const tPing = performance.now();
   try {
     const g = await ensureGraph();
-    const params = buildParams(g.ctx.sampleRate, cfg);
-    const results: EchoResult[] = [];
+    const fs = g.ctx.sampleRate;
+    // Pipeline: DSP of recording i runs in the worker while recording i+1 is captured.
+    const jobs: Promise<EchoResult>[] = [];
     for (let i = 0; i < cfg.average; i++) {
-      const rec = await recordOnce(g.ctx, g.node, params.chirp);
-      results.push(processEcho(rec, params));
+      const rec = await timedAsync("sonar.record", () => recordOnce(g.ctx, g.node, cfg.gain));
+      jobs.push(processEchoAsync(rec, fs, cfg));
       if (i < cfg.average - 1) await new Promise((r) => setTimeout(r, 120));
     }
+    const results = await Promise.all(jobs);
+    record("sonar.ping", performance.now() - tPing);
     const agg = aggregateEchoes(results);
     const okRes = results.filter((r) => r.status === "ok");
     const dists = okRes.map((r) => r.distM as number);
@@ -201,6 +195,8 @@ export function stopSonar() {
   void ctx?.close().catch(() => undefined);
   ctx = null;
   workletReady = null;
+  chirpBuf = null;
+  disposeSonarWorker();
 }
 
 export function buildChirpPreview(cfg?: Partial<SonarConfig>): number[] {

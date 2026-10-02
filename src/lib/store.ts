@@ -49,6 +49,7 @@ export function createStore<T extends object>(init: (set: SetState<T>, get: GetS
     };
   };
   state = init(set, get);
+  const initial = state; // SSR + hydration must render from this, never from live (already ticking) state
 
   function useStore<U>(selector?: (s: T) => U, equals: (a: U, b: U) => boolean = Object.is): U {
     const sel = (selector ?? ((s: T) => s as unknown as U)) as (s: T) => U;
@@ -65,7 +66,8 @@ export function createStore<T extends object>(init: (set: SetState<T>, get: GetS
       cache.current = { s: state, v, sel };
       return v;
     };
-    return useSyncExternalStore(subscribe, snap, snap);
+    const serverSnap = () => sel(initial);
+    return useSyncExternalStore(subscribe, snap, serverSnap);
   }
   return Object.assign(useStore, { getState: get, setState: set, subscribe }) as UseStore<T>;
 }

@@ -1,0 +1,20 @@
+import chromium from "@sparticuz/chromium";
+import { chromium as pw } from "playwright-core";
+const wav = process.argv[2] || "/home/user/browser/mic15.wav";
+const b = await pw.launch({ executablePath: await chromium.executablePath(), headless: true,
+  args: ["--no-sandbox","--use-fake-ui-for-media-stream","--use-fake-device-for-media-stream",`--use-file-for-fake-audio-capture=${wav}`,"--autoplay-policy=no-user-gesture-required"] });
+const ctx = await b.newContext({ viewport: { width: 900, height: 1200 }, permissions: ["microphone"] });
+const p = await ctx.newPage();
+const errs = [];
+p.on("pageerror", (e) => errs.push("PAGEERR " + e.message));
+p.on("console", (m) => { if (m.type() === "error") errs.push(m.text().slice(0, 200)); });
+await p.goto("http://localhost:8080/sonar", { waitUntil: "load" });
+await p.waitForTimeout(1500);
+await p.getByRole("button", { name: /发射/ }).first().click();
+await p.waitForFunction(() => !document.body.innerText.includes("等待脉冲"), null, { timeout: 20000 }).catch(() => {});
+await p.waitForTimeout(500);
+const txt = await p.evaluate(() => document.body.innerText);
+console.log(txt.split("\n").filter((l) => /距离|SNR|回波|直达|脉冲|m$|dB|ms|worker/.test(l)).slice(0, 30).join(" | "));
+console.log("ERR", errs);
+await p.screenshot({ path: `/home/user/browser/sonar${process.env.TAG || ""}.png`, fullPage: false });
+await b.close();

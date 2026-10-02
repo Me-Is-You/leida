@@ -1,7 +1,9 @@
 import { useEffect, useRef } from "react";
-import { analyzeFrame, getCameraStream } from "@/lib/device";
+import { DetectScheduler } from "@/lib/core/detect-sched";
+import { analyzeFrame, getCameraStream, readBattery, resetFrameHistory } from "@/lib/device";
+import { record } from "@/lib/perf";
 import { useRadar } from "@/lib/radar-store";
-import { cocoState, detectCoco, loadCoco } from "@/lib/vision";
+import { cocoState, detectCoco, loadCoco, type RawDet } from "@/lib/vision";
 
 /**
  * Headless vision pump. Owns an off-screen <video>, runs frame statistics for
@@ -48,6 +50,11 @@ export function CameraEngine() {
     if (!cameraOn) return;
     let alive = true;
     let timer = 0;
+    const sched = new DetectScheduler();
+    resetFrameHistory();
+    void readBattery().then((b) => {
+      sched.saver = !!b && !b.charging && b.level < 0.2;
+    });
     const loop = async () => {
       if (!alive) return;
       const video = videoRef.current;
@@ -55,19 +62,41 @@ export function CameraEngine() {
       const st = useRadar.getState();
       let wait = 150;
       if (video && canvas && !document.hidden && video.readyState >= 2 && video.videoWidth > 0) {
-        const metrics = analyzeFrame(video, canvas);
-        const aspect = video.videoWidth / video.videoHeight;
         const t0 = performance.now();
-        let raw: Awaited<ReturnType<typeof detectCoco>> = [];
-        if (st.settings.detectOn && cocoState() === "ready") {
-          raw = await detectCoco(video, st.settings.minScore);
+        const metrics = analyzeFrame(video, canvas);
+        record("vision.frame", performance.now() - t0);
+        const aspect = video.videoWidth / video.videoHeight;
+        const detecting = st.settings.detectOn;
+        const modelReady = cocoState() === "ready";
+        const d = sched.decide(t0, {
+          motion: metrics?.motion ?? 0,
+          moving: metrics?.moving.length ?? 0,
+          ego: metrics?.egoMotion ?? false,
+          tracks: st.detections.length,
+        });
+        let ms = 0;
+        if (!detecting) {
+          // no inference requested: only the cheap frame statistics feed the environment classifier
+          st.ingestVision(st.detections.length ? [] : null, metrics, aspect, 0);
+        } else if (modelReady && d.runNN) {
+          const t1 = performance.now();
+          const raw = await detectCoco(video, st.settings.minScore);
+          if (!alive) return;
+          ms = performance.now() - t1;
+          record("vision.nn", ms);
+          sched.noteNn(t1);
+          useRadar.getState().ingestVision(raw ?? [], metrics, aspect, ms);
+          void useRadar.getState().scanBarcodesOn(video);
+        } else if (!modelReady) {
+          // model missing/offline: the own motion detector still yields unlabeled moving blobs
+          const blobs: RawDet[] = (metrics?.moving ?? []).map((b) => ({ cls: "运动物体", score: 0.5, bbox: b }));
+          st.ingestVision(blobs, metrics, aspect, 0);
+          void st.scanBarcodesOn(video);
+        } else {
+          st.ingestVision(null, metrics, aspect, 0);
         }
-        if (!alive) return;
-        const ms = performance.now() - t0;
-        useRadar.getState().ingestVision(raw ?? [], metrics, aspect, ms);
-        if (st.settings.detectOn) void useRadar.getState().scanBarcodesOn(video);
         // keep ≥ 60 ms idle so the UI thread is never starved on slow phones
-        wait = Math.max(60, 130 - ms);
+        wait = Math.max(60, 130 - ms, d.delayMs);
       }
       timer = window.setTimeout(() => void loop(), wait);
     };

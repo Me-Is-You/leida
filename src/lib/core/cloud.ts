@@ -6,14 +6,22 @@
 export type CloudKind = "person" | "object" | "wall" | "free" | "traj" | "sonar";
 export const CLOUD_KINDS: CloudKind[] = ["person", "object", "wall", "free", "traj", "sonar"];
 
+/**
+ * Fixed-capacity point ring with voxel de-duplication. The voxel index lives
+ * in an open-addressing hash table over typed arrays (linear probing,
+ * backward-shift deletion): no string keys, no per-point allocation, so adding
+ * 20 000 points produces no garbage for the GC to collect mid-frame.
+ */
 export class PointRing {
   readonly capacity: number;
   readonly voxel: number;
   /** xyz triplets, only the first `size` points are valid (ring order). */
   readonly pos: Float32Array;
   readonly time: Float32Array;
-  private readonly keys: (string | null)[];
-  private readonly index = new Map<string, number>();
+  private readonly slotKey: Int32Array; // voxel (ix,iy,iz) of each occupied slot
+  private readonly slotLive: Uint8Array;
+  private readonly tab: Int32Array; // hash table → slot index, −1 = empty
+  private readonly mask: number;
   private head = 0;
   size = 0;
   version = 0;
@@ -23,20 +31,64 @@ export class PointRing {
     this.voxel = voxel;
     this.pos = new Float32Array(capacity * 3);
     this.time = new Float32Array(capacity);
-    this.keys = new Array<string | null>(capacity).fill(null);
+    this.slotKey = new Int32Array(capacity * 3);
+    this.slotLive = new Uint8Array(capacity);
+    let t = 8;
+    while (t < capacity * 2) t <<= 1;
+    this.tab = new Int32Array(t).fill(-1);
+    this.mask = t - 1;
   }
 
-  private keyOf(x: number, y: number, z: number): string {
-    const v = this.voxel;
-    return `${Math.round(x / v)},${Math.round(y / v)},${Math.round(z / v)}`;
+  private hash(ix: number, iy: number, iz: number): number {
+    let h = Math.imul(ix, 0x9e3779b1) ^ Math.imul(iy, 0x85ebca6b) ^ Math.imul(iz, 0xc2b2ae35);
+    h ^= h >>> 15;
+    h = Math.imul(h, 0x2c1b3c6d);
+    h ^= h >>> 13;
+    return h & this.mask;
+  }
+
+  /** Table position holding voxel (ix,iy,iz), or the empty position where it would go (as ~pos). */
+  private probe(ix: number, iy: number, iz: number): number {
+    const { tab, slotKey, mask } = this;
+    let i = this.hash(ix, iy, iz);
+    for (;;) {
+      const s = tab[i] as number;
+      if (s < 0) return ~i;
+      const o = s * 3;
+      if (slotKey[o] === ix && slotKey[o + 1] === iy && slotKey[o + 2] === iz) return i;
+      i = (i + 1) & mask;
+    }
+  }
+
+  private removeAt(pos: number) {
+    const { tab, slotKey, mask } = this;
+    let i = pos;
+    let j = pos;
+    for (;;) {
+      j = (j + 1) & mask;
+      const s = tab[j] as number;
+      if (s < 0) break;
+      const o = s * 3;
+      const ideal = this.hash(slotKey[o] as number, slotKey[o + 1] as number, slotKey[o + 2] as number);
+      // can the entry at j move back into the hole at i without breaking its probe chain?
+      if (((j - ideal) & mask) >= ((j - i) & mask)) {
+        tab[i] = s;
+        i = j;
+      }
+    }
+    tab[i] = -1;
   }
 
   /** Returns true when a *new* point was stored. Re-observing a voxel refreshes it. */
   add(x: number, y: number, z: number, t = 0): boolean {
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return false;
-    const k = this.keyOf(x, y, z);
-    const hit = this.index.get(k);
-    if (hit !== undefined) {
+    const inv = 1 / this.voxel;
+    const ix = Math.round(x * inv) | 0;
+    const iy = Math.round(y * inv) | 0;
+    const iz = Math.round(z * inv) | 0;
+    const found = this.probe(ix, iy, iz);
+    if (found >= 0) {
+      const hit = this.tab[found] as number;
       // running average keeps the voxel centred on its observations
       const o = hit * 3;
       this.pos[o] = (this.pos[o] as number) * 0.8 + x * 0.2;
@@ -46,23 +98,31 @@ export class PointRing {
       return false;
     }
     const slot = this.head;
-    const old = this.keys[slot];
-    if (old) this.index.delete(old);
-    this.keys[slot] = k;
-    this.index.set(k, slot);
+    if (this.slotLive[slot]) {
+      const o = slot * 3;
+      const old = this.probe(this.slotKey[o] as number, this.slotKey[o + 1] as number, this.slotKey[o + 2] as number);
+      if (old >= 0) this.removeAt(old);
+    }
+    // the eviction may have shifted entries, so probe the insertion point again
+    const at = ~this.probe(ix, iy, iz);
+    this.tab[at] = slot;
+    this.slotKey[slot * 3] = ix;
+    this.slotKey[slot * 3 + 1] = iy;
+    this.slotKey[slot * 3 + 2] = iz;
+    this.slotLive[slot] = 1;
     this.pos[slot * 3] = x;
     this.pos[slot * 3 + 1] = y;
     this.pos[slot * 3 + 2] = z;
     this.time[slot] = t;
-    this.head = (slot + 1) % this.capacity;
+    this.head = slot + 1 === this.capacity ? 0 : slot + 1;
     this.size = Math.min(this.size + 1, this.capacity);
     this.version++;
     return true;
   }
 
   clear() {
-    this.index.clear();
-    this.keys.fill(null);
+    this.tab.fill(-1);
+    this.slotLive.fill(0);
     this.head = 0;
     this.size = 0;
     this.version++;

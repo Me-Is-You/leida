@@ -37,6 +37,7 @@ import {
 import { emitTwinPoints, envWeights, observerPose, resetTwin, stepTwin, twinPing, twinSonarRange } from "./engine";
 import { computeSar, trajLength } from "./fusion";
 import { pingSonar, stopSonar, sonarBusy, type SonarConfig } from "./sonar";
+import { record } from "./perf";
 import { kindOfClass, type RawDet } from "./vision";
 import type {
   Alert,
@@ -179,7 +180,7 @@ export interface RadarState {
   scanBt: () => Promise<void>;
   locate: () => Promise<void>;
   fullCheck: () => void;
-  ingestVision: (dets: RawDet[], metrics: FrameMetrics | null, aspect: number, detectMs: number) => void;
+  ingestVision: (dets: RawDet[] | null, metrics: FrameMetrics | null, aspect: number, detectMs: number) => void;
   scanBarcodesOn: (video: HTMLVideoElement) => Promise<void>;
   setOcr: (r: OcrResult | null) => void;
   setModelStatus: (s: ModelStatus) => void;
@@ -347,7 +348,9 @@ export const useRadar = createStore<RadarState>((set, get) => {
 
     // ── twin (demo only) ──
     const hRad = devHeading != null ? (devHeading * Math.PI) / 180 : undefined;
+    const tTwin = performance.now();
     const twin = demo ? stepTwin(t, hRad) : null;
+    if (demo) record("twin.step", performance.now() - tTwin);
 
     // ── sensors → channels ──
     const mag: MagSample = devMag ?? twin?.mag ?? NONE_MAG;
@@ -416,6 +419,7 @@ export const useRadar = createStore<RadarState>((set, get) => {
     const centre = visionDets
       .filter((d) => !d.truncated && Math.abs(bearingOf(d.bbox[0] + d.bbox[2] / 2, camModel(s, 4 / 3))) < 12)
       .sort((a, b) => a.depthM - b.depthM)[0];
+    const tFuse = performance.now();
     const fused = fuseRanges([
       ...(sonarNow && sonarNow.distM !== null && sonarNow.source === "device"
         ? [
@@ -429,6 +433,7 @@ export const useRadar = createStore<RadarState>((set, get) => {
         : []),
       ...(centre ? [{ id: "vision" as const, rangeM: centre.depthM, sigmaM: centre.sigmaM ?? centre.depthM * 0.3, weight: fusion.vision }] : []),
     ]);
+    record("fusion.range", performance.now() - tFuse);
 
     // ── alerts ──
     const fresh = alertEng.update(t0, {
@@ -504,7 +509,11 @@ export const useRadar = createStore<RadarState>((set, get) => {
       sar,
       fusion,
       fps,
-      latencyUs: (performance.now() - t0) * 1000,
+      latencyUs: (() => {
+        const ms = performance.now() - t0;
+        record("store.tick", ms);
+        return ms * 1000;
+      })(),
       clock: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
       rssiHist,
       magHist,
@@ -1021,6 +1030,7 @@ export const useRadar = createStore<RadarState>((set, get) => {
         visionMetrics = metrics;
         visionMetricsAt = performance.now();
       }
+      if (raw === null) return; // inference skipped by the scheduler: keep tracks as they are
       detectMsEma = detectMsEma ? detectMsEma * 0.8 + detectMs * 0.2 : detectMs;
       const confirmed = tracker.update(raw.map((d) => ({ cls: d.cls, score: d.score, bbox: d.bbox })));
       const dets: Detection[] = confirmed.map((trk) => {

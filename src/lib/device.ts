@@ -1,4 +1,6 @@
 import { compassHeading, cameraPitchDeg } from "./core/compass.ts";
+import { grayStats, rgbaToGray } from "./core/imageops.ts";
+import { MotionDetector } from "./core/motion-detect.ts";
 import type { Capability, GeoSample, ImuSample, MagSample } from "./types";
 
 type SensorCtor<T> = new (opts?: { frequency?: number }) => T & {
@@ -10,7 +12,11 @@ type MagLike = SensorCtor<{ x: number; y: number; z: number }>;
 type LightLike = SensorCtor<{ illuminance: number }>;
 
 let cameraStream: MediaStream | null = null;
-let prevGray: Float32Array | null = null;
+let prevGray: Uint8Array | null = null;
+let grayBuf: Uint8Array | null = null;
+let motionDet: MotionDetector | null = null;
+let frameCtx: CanvasRenderingContext2D | null = null;
+let frameCanvas: HTMLCanvasElement | null = null;
 
 export function getCameraStream() {
   return cameraStream;
@@ -428,46 +434,57 @@ export interface FrameMetrics {
   noise: number;
   /** Mean absolute frame difference 0–1. */
   motion: number;
+  /** Moving blobs (normalised x,y,w,h) from the own background-subtraction detector; empty while the camera itself moves. */
+  moving: [number, number, number, number][];
+  /** True when most of the frame changed (hand-held motion / exposure jump) so blobs are not meaningful. */
+  egoMotion: boolean;
 }
 
 const TW = 96;
 const TH = 72;
 
-/** Cheap global image statistics for environment classification. Returns null when no frame is ready. */
+/**
+ * One-pass frame analysis on a 96×72 thumbnail: brightness / texture / contrast /
+ * global motion (integer luma, no per-frame float allocations) plus the moving
+ * blobs of the background-subtraction detector. Returns null when no frame is ready.
+ */
 export function analyzeFrame(video: HTMLVideoElement, canvas: HTMLCanvasElement): FrameMetrics | null {
   if (video.readyState < 2 || !video.videoWidth) return null;
-  canvas.width = TW;
-  canvas.height = TH;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (frameCanvas !== canvas || !frameCtx) {
+    canvas.width = TW;
+    canvas.height = TH;
+    frameCtx = canvas.getContext("2d", { willReadFrequently: true });
+    frameCanvas = canvas;
+  }
+  const ctx = frameCtx;
   if (!ctx) return null;
   ctx.drawImage(video, 0, 0, TW, TH);
   const d = ctx.getImageData(0, 0, TW, TH).data;
-  const gray = new Float32Array(TW * TH);
-  let sum = 0;
-  let edge = 0;
-  for (let i = 0, p = 0; i < d.length; i += 4, p++) {
-    const g = 0.2126 * (d[i] as number) + 0.7152 * (d[i + 1] as number) + 0.0722 * (d[i + 2] as number);
-    gray[p] = g;
-    sum += g;
-    if (p % TW > 0 && Math.abs(g - (gray[p - 1] as number)) > 28) edge++;
-  }
-  const brightness = sum / gray.length;
-  const texture = edge / gray.length;
-  let varSum = 0;
-  for (let i = 0; i < gray.length; i++) varSum += ((gray[i] as number) - brightness) ** 2;
-  const noise = Math.sqrt(varSum / gray.length);
-  let motion = 0;
-  if (prevGray && prevGray.length === gray.length) {
-    let md = 0;
-    for (let i = 0; i < gray.length; i++) md += Math.abs((gray[i] as number) - (prevGray[i] as number));
-    motion = md / (gray.length * 255);
-  }
+  const gray = new Uint8Array(TW * TH);
+  rgbaToGray(d, gray);
+  const st = grayStats(gray, TW, prevGray);
+  motionDet ??= new MotionDetector(TW, TH);
+  const m = motionDet.update(gray);
   prevGray = gray;
-  return { brightness, texture, noise, motion };
+  grayBuf = gray;
+  return {
+    brightness: st.brightness,
+    texture: st.texture,
+    noise: st.contrast,
+    motion: st.motion,
+    moving: m.boxes.map((b) => [b.x / TW, b.y / TH, b.w / TW, b.h / TH] as [number, number, number, number]),
+    egoMotion: m.egoMotion,
+  };
+}
+
+/** Last analysed thumbnail (96×72 gray), e.g. for text-region hints. */
+export function lastGray(): { data: Uint8Array; w: number; h: number } | null {
+  return grayBuf ? { data: grayBuf, w: TW, h: TH } : null;
 }
 
 export function resetFrameHistory() {
   prevGray = null;
+  motionDet?.reset();
 }
 
 export function hostRuntime() {
