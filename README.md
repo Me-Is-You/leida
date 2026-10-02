@@ -68,6 +68,10 @@ npm run build
 - 磁力计：手机/保护壳的静磁背景、Chrome 对 Magnetometer 的可用性。
 - iOS：需要点「启用传感器」触发运动/方向权限。
 
+## CI
+
+`docs/ci.yml.example` 是现成的 GitHub Actions 配置（tsc + 核心测试 + build）。需要有 `workflows` 权限的账号把它复制到 `.github/workflows/ci.yml`。
+
 ## 文档
 
 - `docs/ANALYSIS_v18_ROADMAP.md` 分析与路线图
