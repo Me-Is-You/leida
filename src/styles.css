@@ -1,7 +1,12 @@
 @import "tailwindcss";
+@import "@fontsource/outfit/400.css";
+@import "@fontsource/outfit/500.css";
+@import "@fontsource/outfit/600.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
 
 @theme {
-  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Outfit", ui-sans-serif, system-ui, "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", monospace;
   --font-display: "Outfit", ui-sans-serif, system-ui, sans-serif;
 

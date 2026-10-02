@@ -20,10 +20,6 @@ export const Route = createRootRoute({
       { rel: "stylesheet", href: appCss },
       { rel: "manifest", href: "/__grok/manifest.webmanifest" },
       { rel: "apple-touch-icon", href: "/__grok/icon-180.png" },
-      {
-        rel: "stylesheet",
-        href: "https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Outfit:wght@400;500;600;700&display=swap",
-      },
     ],
   }),
   component: Root,
