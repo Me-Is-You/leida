@@ -14,6 +14,7 @@ import { parseSession, type SessionData } from "./core/session-schema.ts";
 import { IouTracker } from "./core/tracker.ts";
 import {
   cameraSettings,
+  barcodeSupported,
   detectBarcodes,
   probeCapabilities,
   readGeo,
@@ -181,7 +182,7 @@ export interface RadarState {
   locate: () => Promise<void>;
   fullCheck: () => void;
   ingestVision: (dets: RawDet[] | null, metrics: FrameMetrics | null, aspect: number, detectMs: number) => void;
-  scanBarcodesOn: (video: HTMLVideoElement) => Promise<void>;
+  scanBarcodesOn: (video: HTMLVideoElement, thorough?: boolean) => Promise<void>;
   setOcr: (r: OcrResult | null) => void;
   setModelStatus: (s: ModelStatus) => void;
   pushLog: (msg: string, level?: LogEntry["level"]) => void;
@@ -1088,11 +1089,12 @@ export const useRadar = createStore<RadarState>((set, get) => {
         get().pushLog(`视觉 ${top.cls} ${(top.score * 100).toFixed(0)}% · ≈${top.depthM.toFixed(1)} m（${top.depthBasis}）`, "DETECT");
       }
     },
-    scanBarcodesOn: async (video) => {
+    scanBarcodesOn: async (video, thorough = false) => {
       const now = performance.now();
-      if (now - barcodeAt < 900) return;
+      if (!thorough && now - barcodeAt < (barcodeSupported() ? 900 : 1500)) return;
       barcodeAt = now;
-      const codes = await detectBarcodes(video);
+      // the own QR decoder (no BarcodeDetector in this browser) is also what auto-scan uses, at a lower rate
+      const codes = await detectBarcodes(video, thorough || !barcodeSupported());
       if (!codes.length) return;
       const prev = get().barcodes;
       const fresh = codes.filter((c) => !prev.some((p) => p.value === c.value));

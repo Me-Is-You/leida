@@ -1,6 +1,8 @@
 import { compassHeading, cameraPitchDeg } from "./core/compass.ts";
 import { grayStats, rgbaToGray } from "./core/imageops.ts";
 import { MotionDetector } from "./core/motion-detect.ts";
+import { decodeQrImage } from "./core/qr-locate.ts";
+import { record } from "./perf.ts";
 import type { Capability, GeoSample, ImuSample, MagSample } from "./types";
 
 type SensorCtor<T> = new (opts?: { frequency?: number }) => T & {
@@ -302,16 +304,54 @@ export function barcodeSupported(): boolean {
   return typeof window !== "undefined" && "BarcodeDetector" in window;
 }
 
-/** Scans `source` at its native resolution (pass the <video>, not a 96×72 thumbnail). */
-export async function detectBarcodes(source: CanvasImageSource): Promise<{ value: string; format: string }[]> {
-  if (!barcodeSupported()) return [];
-  try {
-    if (!barcodeDetector) {
-      const BD = (window as unknown as { BarcodeDetector: new (o?: { formats: string[] }) => BarcodeDetectorLike }).BarcodeDetector;
-      barcodeDetector = new BD();
+let qrCanvas: HTMLCanvasElement | null = null;
+
+/** Own QR decoder on a ≤960 px gray copy of the frame (rotation / perspective tolerant). */
+function decodeQrOwn(source: HTMLVideoElement | HTMLCanvasElement): { value: string; format: string }[] {
+  const sw = source instanceof HTMLVideoElement ? source.videoWidth : source.width;
+  const sh = source instanceof HTMLVideoElement ? source.videoHeight : source.height;
+  if (!sw || !sh) return [];
+  const k = Math.min(1, 960 / Math.max(sw, sh));
+  const w = Math.max(32, Math.round(sw * k));
+  const h = Math.max(32, Math.round(sh * k));
+  qrCanvas ??= document.createElement("canvas");
+  if (qrCanvas.width !== w || qrCanvas.height !== h) {
+    qrCanvas.width = w;
+    qrCanvas.height = h;
+  }
+  const ctx = qrCanvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return [];
+  ctx.drawImage(source, 0, 0, w, h);
+  const gray = new Uint8Array(w * h);
+  rgbaToGray(ctx.getImageData(0, 0, w, h).data, gray);
+  const t0 = performance.now();
+  const hit = decodeQrImage(gray, w, h);
+  record("qr.decode", performance.now() - t0);
+  return hit ? [{ value: hit.text, format: "qr_code" }] : [];
+}
+
+/**
+ * Scans the frame for codes. The platform BarcodeDetector (hardware accelerated,
+ * also 1-D codes) goes first; the own QR decoder runs when it is unavailable, or
+ * when `thorough` is set and it found nothing (manual scan button).
+ */
+export async function detectBarcodes(source: HTMLVideoElement | HTMLCanvasElement, thorough = false): Promise<{ value: string; format: string }[]> {
+  let found: { value: string; format: string }[] = [];
+  if (barcodeSupported()) {
+    try {
+      if (!barcodeDetector) {
+        const BD = (window as unknown as { BarcodeDetector: new (o?: { formats: string[] }) => BarcodeDetectorLike }).BarcodeDetector;
+        barcodeDetector = new BD();
+      }
+      const codes = await barcodeDetector.detect(source);
+      found = codes.filter((c) => c.rawValue).map((c) => ({ value: c.rawValue, format: c.format ?? "?" }));
+    } catch {
+      found = [];
     }
-    const codes = await barcodeDetector.detect(source);
-    return codes.filter((c) => c.rawValue).map((c) => ({ value: c.rawValue, format: c.format ?? "?" }));
+    if (found.length || !thorough) return found;
+  }
+  try {
+    return decodeQrOwn(source);
   } catch {
     return [];
   }

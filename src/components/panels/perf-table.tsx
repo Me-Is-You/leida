@@ -14,6 +14,7 @@ const LABEL: Record<string, string> = {
   "vision.nn": "视觉 · COCO-SSD 推理",
   "ocr.prep": "OCR · 文字定位 + 二值化",
   "ocr.recognize": "OCR · Tesseract 识字",
+  "qr.decode": "二维码 · 自研解码",
   "render.3d": "3D 渲染（自研 WebGL2）",
 };
 

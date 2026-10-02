@@ -108,7 +108,7 @@ function VisionPage() {
     const v = liveVideo();
     if (!v) return;
     setBarBusy(true);
-    await scanBarcodesOn(v);
+    await scanBarcodesOn(v, true);
     setBarBusy(false);
   };
 
@@ -299,14 +299,16 @@ function VisionPage() {
         <Card>
           <CardHeader>
             <CardTitle>条码 / 二维码</CardTitle>
-            <CardHint>BarcodeDetector</CardHint>
+            <CardHint>系统扫码 + 自研 QR 解码</CardHint>
           </CardHeader>
           <Button size="sm" onClick={() => void doBarcode()} disabled={!cameraOn || barBusy}>
             {barBusy ? "扫描中…" : "扫描当前画面"}
           </Button>
           {barcodes.length === 0 ? (
             <p className="mt-3 text-xs text-muted">
-              {typeof window !== "undefined" && "BarcodeDetector" in window ? "没有识别到条码。" : "此浏览器不支持 BarcodeDetector（Chrome / Android 可用）。"}
+              {typeof window !== "undefined" && "BarcodeDetector" in window
+                ? "没有识别到条码。系统扫码器负责一维码，二维码找不到时自研解码器会再试一遍。"
+                : "没有识别到二维码（此浏览器没有 BarcodeDetector，已使用自研 QR 解码器；一维码需要 Chrome / Android）。"}
             </p>
           ) : (
             <ul className="mt-3 space-y-2">
