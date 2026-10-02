@@ -1,14 +1,20 @@
 import { useEffect, useRef } from "react";
 import { analyzeFrame, getCameraStream } from "@/lib/device";
-import { observerPose } from "@/lib/engine";
-import { scanFrameBarcodes, useRadar } from "@/lib/radar-store";
-import { blobsToDetections, cocoState, detectCoco, extractContour, loadCoco } from "@/lib/vision";
+import { useRadar } from "@/lib/radar-store";
+import { cocoState, detectCoco, loadCoco } from "@/lib/vision";
 
+/**
+ * Headless vision pump. Owns an off-screen <video>, runs frame statistics for
+ * the environment classifier and (when enabled) the COCO-SSD detector, then
+ * hands the raw detections to the store, which tracks / projects / maps them.
+ * One detection runs at a time — never overlapping, so a slow phone just lowers the rate.
+ */
 export function CameraEngine() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cameraOn = useRadar((s) => s.cameraOn);
-  const detectOn = useRadar((s) => s.detectOn);
+  const cameraEpoch = useRadar((s) => s.cameraEpoch);
+  const detectOn = useRadar((s) => s.settings.detectOn);
   const setModelStatus = useRadar((s) => s.setModelStatus);
 
   useEffect(() => {
@@ -21,7 +27,7 @@ export function CameraEngine() {
     } else {
       video.srcObject = null;
     }
-  }, [cameraOn]);
+  }, [cameraOn, cameraEpoch]);
 
   useEffect(() => {
     if (!cameraOn || !detectOn) return;
@@ -30,7 +36,8 @@ export function CameraEngine() {
     void loadCoco().then((ok) => {
       if (cancelled) return;
       setModelStatus(ok ? "ready" : "fallback");
-      useRadar.getState().pushLog(ok ? "COCO-SSD lite 已加载" : "视觉走帧分析回退 · 仍为真实像素", ok ? "REAL" : "INFO");
+      const st = useRadar.getState();
+      st.pushLog(ok ? "COCO-SSD 已加载（本地模型）" : "COCO-SSD 加载失败：无检测，仅统计画面亮度/纹理", ok ? "REAL" : "WARN");
     });
     return () => {
       cancelled = true;
@@ -38,52 +45,41 @@ export function CameraEngine() {
   }, [cameraOn, detectOn, setModelStatus]);
 
   useEffect(() => {
-    if (!cameraOn || !detectOn) return;
+    if (!cameraOn) return;
     let alive = true;
-    let last = 0;
-    let busy = false;
-    const loop = (now: number) => {
+    let timer = 0;
+    const loop = async () => {
       if (!alive) return;
-      if (now - last > 120 && !busy) {
-        last = now;
-        const video = videoRef.current;
-        const canvas = canvasRef.current;
-        const st = useRadar.getState();
-        if (video && canvas && video.readyState >= 2) {
-          const metrics = analyzeFrame(video, canvas);
-          const obs = observerPose(st.t);
-          busy = true;
-          const finish = (dets: ReturnType<typeof blobsToDetections>) => {
-            if (st.contourOn) {
-              for (const d of dets) {
-                d.contour = extractContour(metrics.gray, metrics.width, metrics.height, d.bbox);
-              }
-            }
-            st.ingestVision(dets, metrics);
-            if (now % 1400 < 160) void scanFrameBarcodes(canvas);
-            busy = false;
-          };
-          if (cocoState() === "ready") {
-            void detectCoco(video, obs.pos).then((ml) => {
-              if (!alive) return;
-              finish(ml && ml.length ? ml : blobsToDetections(metrics.blobs, obs.pos, "device"));
-            });
-          } else {
-            finish(blobsToDetections(metrics.blobs, obs.pos, "device"));
-          }
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      const st = useRadar.getState();
+      let wait = 150;
+      if (video && canvas && !document.hidden && video.readyState >= 2 && video.videoWidth > 0) {
+        const metrics = analyzeFrame(video, canvas);
+        const aspect = video.videoWidth / video.videoHeight;
+        const t0 = performance.now();
+        let raw: Awaited<ReturnType<typeof detectCoco>> = [];
+        if (st.settings.detectOn && cocoState() === "ready") {
+          raw = await detectCoco(video, st.settings.minScore);
         }
+        if (!alive) return;
+        const ms = performance.now() - t0;
+        useRadar.getState().ingestVision(raw ?? [], metrics, aspect, ms);
+        if (st.settings.detectOn) void useRadar.getState().scanBarcodesOn(video);
+        // keep ≥ 60 ms idle so the UI thread is never starved on slow phones
+        wait = Math.max(60, 130 - ms);
       }
-      requestAnimationFrame(loop);
+      timer = window.setTimeout(() => void loop(), wait);
     };
-    const id = requestAnimationFrame(loop);
+    timer = window.setTimeout(() => void loop(), 200);
     return () => {
       alive = false;
-      cancelAnimationFrame(id);
+      window.clearTimeout(timer);
     };
-  }, [cameraOn, detectOn]);
+  }, [cameraOn, cameraEpoch]);
 
   return (
-    <div className="pointer-events-none absolute -left-[9999px] size-0 overflow-hidden">
+    <div className="pointer-events-none absolute -left-[9999px] size-0 overflow-hidden" aria-hidden>
       <video ref={videoRef} playsInline muted autoPlay />
       <canvas ref={canvasRef} />
     </div>

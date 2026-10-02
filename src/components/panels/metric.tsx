@@ -22,14 +22,16 @@ export function Metric({
 
 export function SourceBadge({ source }: { source: string }) {
   const real = source === "device";
+  const none = source === "none";
   return (
     <span
+      title={real ? "真实设备数据" : none ? "无数据" : "演示 / 物理孪生（模拟）"}
       className={cn(
         "inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide",
-        real ? "bg-accent/20 text-accent" : "bg-raised text-faint",
+        real ? "bg-accent/20 text-accent" : none ? "bg-raised text-faint/60" : "bg-warn/15 text-warn",
       )}
     >
-      {real ? "real" : "twin"}
+      {real ? "real" : none ? "—" : "demo"}
     </span>
   );
 }

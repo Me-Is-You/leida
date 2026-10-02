@@ -2,26 +2,40 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Grid, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
+import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
+import { CLOUD_KINDS, type CloudKind } from "@/lib/core/cloud.ts";
+import { mulberry32 } from "@/lib/core/math.ts";
 import { AP, ROOM, WALL_X } from "@/lib/engine";
-import { useRadar } from "@/lib/radar-store";
+import { cloud, effectiveSonar, grid, useRadar } from "@/lib/radar-store";
 import { cn } from "@/lib/utils";
 import type { ViewPreset } from "@/lib/types";
 
-const PRESET: Record<ViewPreset, [number, number, number]> = {
+const OFFSET: Record<ViewPreset, [number, number, number]> = {
   iso: [9.5, 10.5, 14.5],
   top: [0.2, 22, 0.2],
   follow: [-2.2, 4.8, 9.2],
 };
 
+const COLOR: Record<CloudKind, string> = {
+  person: "#8fb4b8",
+  object: "#c7bda3",
+  wall: "#8a909c",
+  free: "#739e85",
+  traj: "#c4a673",
+  sonar: "#b8c7d6",
+};
+const SIZE: Record<CloudKind, number> = { person: 0.07, object: 0.07, wall: 0.06, free: 0.05, traj: 0.06, sonar: 0.11 };
+
 export function RadarCanvas({ className }: { className?: string }) {
   const [ready, setReady] = useState(false);
+  const demo = useRadar((s) => s.dataMode === "demo");
   useEffect(() => setReady(true), []);
   if (!ready) return <div className={cn("h-full min-h-[280px] bg-bg", className)} />;
   return (
     <div className={cn("relative h-full min-h-[280px] bg-bg", className)}>
       <Canvas
         dpr={[1, 1.6]}
-        camera={{ position: PRESET.iso, fov: 40, near: 0.1, far: 220 }}
+        camera={{ position: OFFSET.iso, fov: 40, near: 0.1, far: 220 }}
         gl={{ antialias: true, alpha: false, powerPreference: "high-performance" }}
       >
         <color attach="background" args={["#08090b"]} />
@@ -42,42 +56,91 @@ export function RadarCanvas({ className }: { className?: string }) {
           infiniteGrid
           position={[0, 0.001, 0]}
         />
-        <RangeRings />
-        <Walls />
-        <Sweep />
+        <Follow>
+          <RangeRings />
+        </Follow>
+        {demo ? (
+          <>
+            <Walls />
+            <ObjectMarks />
+            <AccessPoint />
+          </>
+        ) : null}
         <PeopleClouds />
-        <ObjectMarks />
-        <MapCloud />
+        {CLOUD_KINDS.map((k) => (
+          <KindCloud key={k} kind={k} />
+        ))}
         <OccupancyMesh />
         <Trajectory />
         <SonarRay />
         <Observer />
-        <AccessPoint />
-        <CameraRig />
-        <OrbitControls enableDamping dampingFactor={0.08} maxPolarAngle={Math.PI / 2.05} minDistance={5} maxDistance={40} />
+        <Rig />
       </Canvas>
     </div>
   );
 }
 
-function CameraRig() {
-  const preset = useRadar((s) => s.viewPreset);
+/** Moves children with the observer pose (range rings stay centred on the user). */
+function Follow({ children }: { children: React.ReactNode }) {
+  const ref = useRef<THREE.Group>(null);
+  useFrame(() => {
+    const p = useRadar.getState().pose;
+    ref.current?.position.set(p.x, 0, p.z);
+  });
+  return <group ref={ref}>{children}</group>;
+}
+
+function Rig() {
+  const preset = useRadar((s) => s.settings.viewPreset);
+  const controls = useRef<OrbitControlsImpl>(null);
   const { camera } = useThree();
+  const target = useRef(new THREE.Vector3(0, 0.4, 0));
+
   useEffect(() => {
-    const p = PRESET[preset];
-    camera.position.set(p[0], p[1], p[2]);
-    camera.lookAt(0, 0.4, 0);
+    const st = useRadar.getState();
+    const c = st.dataMode === "demo" && preset !== "follow" ? new THREE.Vector3(0, 0.4, 0) : new THREE.Vector3(st.pose.x, 0.4, st.pose.z);
+    target.current.copy(c);
+    const o = OFFSET[preset];
+    camera.position.set(c.x + o[0], o[1], c.z + o[2]);
+    camera.lookAt(c);
+    controls.current?.target.copy(c);
+    controls.current?.update();
   }, [preset, camera]);
-  return null;
+
+  useFrame(() => {
+    const ctl = controls.current;
+    if (!ctl) return;
+    const st = useRadar.getState();
+    const want =
+      st.dataMode === "demo" && st.settings.viewPreset !== "follow"
+        ? new THREE.Vector3(0, 0.4, 0)
+        : new THREE.Vector3(st.pose.x, 0.4, st.pose.z);
+    const delta = want.clone().sub(ctl.target).multiplyScalar(0.08);
+    if (delta.lengthSq() > 1e-8) {
+      ctl.target.add(delta);
+      camera.position.add(delta); // keep the user's orbit offset
+    }
+  });
+
+  return (
+    <OrbitControls
+      ref={controls}
+      enableDamping
+      dampingFactor={0.08}
+      maxPolarAngle={Math.PI / 2.05}
+      minDistance={2.5}
+      maxDistance={45}
+    />
+  );
 }
 
 function RangeRings() {
   return (
     <group rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.02, 0]}>
-      {[3, 6, 9, 12].map((r) => (
+      {[1, 2, 3, 5].map((r) => (
         <mesh key={r}>
-          <ringGeometry args={[r - 0.015, r + 0.015, 72]} />
-          <meshBasicMaterial color="#8fb4b8" transparent opacity={0.16} />
+          <ringGeometry args={[r - 0.012, r + 0.012, 72]} />
+          <meshBasicMaterial color="#8fb4b8" transparent opacity={r === 5 ? 0.22 : 0.12} />
         </mesh>
       ))}
     </group>
@@ -91,11 +154,8 @@ function Walls() {
         <boxGeometry args={[0.08, ROOM.h, ROOM.d]} />
         <meshStandardMaterial color="#2a3038" transparent opacity={0.28} />
       </mesh>
-      {[
-        [-ROOM.w / 2, 0],
-        [ROOM.w / 2, 0],
-      ].map(([x], i) => (
-        <mesh key={i} position={[x, ROOM.h / 2, 0]}>
+      {[-ROOM.w / 2, ROOM.w / 2].map((x) => (
+        <mesh key={x} position={[x, ROOM.h / 2, 0]}>
           <boxGeometry args={[0.06, ROOM.h, ROOM.d]} />
           <meshStandardMaterial color="#1a1e24" transparent opacity={0.22} />
         </mesh>
@@ -104,31 +164,18 @@ function Walls() {
   );
 }
 
-function Sweep() {
-  const ref = useRef<THREE.Mesh>(null);
-  useFrame((_, delta) => {
-    if (ref.current) ref.current.rotation.y += delta * 0.55;
-  });
-  return (
-    <mesh ref={ref} rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.03, 0]}>
-      <circleGeometry args={[12, 48, 0, 0.42]} />
-      <meshBasicMaterial color="#8fb4b8" transparent opacity={0.07} side={THREE.DoubleSide} />
-    </mesh>
-  );
-}
-
 function PeopleClouds() {
   const geos = useMemo(() => {
+    const rnd = mulberry32(42);
     return Array.from({ length: 8 }, () => {
       const n = 180;
       const pos = new Float32Array(n * 3);
       for (let i = 0; i < n; i++) {
-        const h = Math.random();
-        const t = Math.random() * Math.PI * 2;
+        const h = rnd();
+        const t = rnd() * Math.PI * 2;
         const r = 0.28 * (0.55 + 0.45 * Math.sin(h * Math.PI));
-        const head = i > n - 40;
-        if (head) {
-          const p = Math.random() * Math.PI;
+        if (i > n - 40) {
+          const p = rnd() * Math.PI;
           pos[i * 3] = Math.sin(p) * Math.cos(t) * 0.18;
           pos[i * 3 + 1] = 1.52 + Math.cos(p) * 0.18;
           pos[i * 3 + 2] = Math.sin(p) * Math.sin(t) * 0.18;
@@ -143,20 +190,20 @@ function PeopleClouds() {
       return g;
     });
   }, []);
-  const groups = useRef<(THREE.Points | null)[]>([]);
+  const refs = useRef<(THREE.Points | null)[]>([]);
 
   useFrame((state) => {
     const people = useRadar.getState().people;
-    groups.current.forEach((pts, i) => {
+    refs.current.forEach((pts, i) => {
       if (!pts) return;
       const p = people[i];
       pts.visible = !!p;
       if (!p) return;
-      const breathe = 1 + 0.028 * Math.sin(state.clock.elapsedTime * (p.bpm / 60) * Math.PI * 2);
+      const breathe = p.bpm ? 1 + 0.028 * Math.sin(state.clock.elapsedTime * (p.bpm / 60) * Math.PI * 2) : 1;
       pts.position.set(p.pos.x, p.pos.y, p.pos.z);
       pts.scale.set(breathe, 1, breathe);
       const mat = pts.material as THREE.PointsMaterial;
-      mat.opacity = p.behindWall ? 0.32 : p.source === "device" ? 0.95 : 0.82;
+      mat.opacity = p.behindWall ? 0.32 : p.source === "device" ? 0.95 : 0.7;
       mat.color.set(p.source === "device" ? "#7dba9a" : p.behindWall ? "#c4a574" : "#8fb4b8");
     });
   });
@@ -167,9 +214,10 @@ function PeopleClouds() {
         <points
           key={i}
           ref={(el) => {
-            groups.current[i] = el;
+            refs.current[i] = el as unknown as THREE.Points | null;
           }}
           geometry={geo}
+          frustumCulled={false}
         >
           <pointsMaterial
             size={0.07}
@@ -214,123 +262,158 @@ function ObjectMarks() {
   );
 }
 
-function MapCloud() {
+/**
+ * One <points> per kind that reads the ring buffer's Float32Array directly (zero copy).
+ * Geometry is only touched when the ring's version changes.
+ */
+function KindCloud({ kind }: { kind: CloudKind }) {
+  const ring = cloud.rings[kind];
   const geo = useMemo(() => {
     const g = new THREE.BufferGeometry();
-    g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(3), 3));
-    g.setAttribute("color", new THREE.BufferAttribute(new Float32Array(3), 3));
+    g.setAttribute("position", new THREE.BufferAttribute(ring.pos, 3).setUsage(THREE.DynamicDrawUsage));
+    g.setDrawRange(0, 0);
     return g;
-  }, []);
-  const last = useRef(0);
+  }, [ring]);
+  const lastV = useRef(-1);
+  const lastOn = useRef(true);
+  const ref = useRef<THREE.Points>(null);
 
   useFrame(() => {
-    const st = useRadar.getState();
-    const raw = st.mapPoints;
-    const pts = raw.filter((p) => st.kindFilter[p.kind]);
-    if (pts.length === last.current && !st.mapping) return;
-    last.current = pts.length;
-    const pos = new Float32Array(Math.max(pts.length, 1) * 3);
-    const col = new Float32Array(Math.max(pts.length, 1) * 3);
-    const palette: Record<string, [number, number, number]> = {
-      person: [0.56, 0.71, 0.72],
-      object: [0.78, 0.74, 0.64],
-      wall: [0.4, 0.42, 0.46],
-      free: [0.45, 0.62, 0.52],
-      traj: [0.77, 0.65, 0.45],
-      sonar: [0.72, 0.78, 0.84],
-    };
-    for (let i = 0; i < pts.length; i++) {
-      const p = pts[i];
-      if (!p) continue;
-      pos[i * 3] = p.x;
-      pos[i * 3 + 1] = p.y;
-      pos[i * 3 + 2] = p.z;
-      const c = palette[p.kind] ?? [0.6, 0.6, 0.6];
-      col[i * 3] = c[0];
-      col[i * 3 + 1] = c[1];
-      col[i * 3 + 2] = c[2];
+    const on = useRadar.getState().settings.kindFilter[kind];
+    if (ref.current) ref.current.visible = on;
+    if (!on) {
+      lastOn.current = false;
+      return;
     }
-    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+    if (ring.version === lastV.current && lastOn.current) return;
+    lastV.current = ring.version;
+    lastOn.current = true;
+    geo.setDrawRange(0, ring.size);
+    (geo.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
     geo.computeBoundingSphere();
   });
 
   return (
-    <points geometry={geo}>
-      <pointsMaterial size={0.09} vertexColors transparent opacity={0.85} depthWrite={false} sizeAttenuation />
+    <points ref={ref} geometry={geo} frustumCulled={false}>
+      <pointsMaterial size={SIZE[kind]} color={COLOR[kind]} transparent opacity={0.9} depthWrite={false} sizeAttenuation />
     </points>
   );
 }
 
+const MAX_CELLS = 3000;
+
 function OccupancyMesh() {
-  const cells = useRadar((s) => s.occupancy);
-  const meshOn = useRadar((s) => s.meshOn);
-  if (!meshOn || !cells.length) return null;
+  const ref = useRef<THREE.InstancedMesh>(null);
+  const lastV = useRef(-1);
+  const dummy = useMemo(() => new THREE.Object3D(), []);
+  useFrame(() => {
+    const mesh = ref.current;
+    if (!mesh) return;
+    const st = useRadar.getState();
+    mesh.visible = st.meshOn;
+    if (!st.meshOn || grid.version === lastV.current) return;
+    lastV.current = grid.version;
+    const cells = grid.occupiedCells(0.65).slice(0, MAX_CELLS);
+    mesh.count = cells.length;
+    const c = grid.cell;
+    cells.forEach((cell, i) => {
+      const h = 0.1 + (cell.p - 0.65) * 1.2;
+      dummy.position.set(cell.x, h / 2, cell.z);
+      dummy.scale.set(c * 0.92, h, c * 0.92);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+  });
   return (
-    <group>
-      {cells.slice(0, 400).map((c, i) => (
-        <mesh key={`${c.x}-${c.z}-${i}`} position={[c.x, 0.08, c.z]}>
-          <boxGeometry args={[0.3, 0.12 + Math.min(0.6, c.n * 0.04), 0.3]} />
-          <meshStandardMaterial color="#3d4a46" transparent opacity={0.35} />
-        </mesh>
-      ))}
-    </group>
+    <instancedMesh ref={ref} args={[undefined, undefined, MAX_CELLS]} frustumCulled={false}>
+      <boxGeometry args={[1, 1, 1]} />
+      <meshStandardMaterial color="#4d6b60" transparent opacity={0.5} />
+    </instancedMesh>
   );
 }
 
 function Trajectory() {
   const geo = useMemo(() => {
     const g = new THREE.BufferGeometry();
-    g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
+    g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(3000 * 3), 3));
+    g.setDrawRange(0, 0);
     return g;
   }, []);
-  const last = useRef(0);
+  const obj = useMemo(() => {
+    const l = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: "#c4a574", transparent: true, opacity: 0.8 }));
+    l.frustumCulled = false;
+    return l;
+  }, [geo]);
+  const last = useRef(-1);
   useFrame(() => {
     const tr = useRadar.getState().trajectory;
-    if (tr.length === last.current || tr.length < 2) return;
+    if (tr.length === last.current) return;
     last.current = tr.length;
-    const pos = new Float32Array(tr.length * 3);
-    for (let i = 0; i < tr.length; i++) {
-      const p = tr[i];
-      if (!p) continue;
-      pos[i * 3] = p.x;
-      pos[i * 3 + 1] = 0.06;
-      pos[i * 3 + 2] = p.z;
+    const attr = geo.getAttribute("position") as THREE.BufferAttribute;
+    const n = Math.min(tr.length, 3000);
+    for (let i = 0; i < n; i++) {
+      const p = tr[i] as { x: number; z: number };
+      attr.setXYZ(i, p.x, 0.06, p.z);
     }
-    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    attr.needsUpdate = true;
+    geo.setDrawRange(0, n);
+    geo.computeBoundingSphere();
   });
   return (
-    <line geometry={geo}>
-      <lineBasicMaterial color="#c4a574" transparent opacity={0.7} />
-    </line>
+    <primitive object={obj} />
   );
 }
 
 function SonarRay() {
   const ref = useRef<THREE.Mesh>(null);
   useFrame(() => {
+    const m = ref.current;
+    if (!m) return;
     const st = useRadar.getState();
-    const d = st.sonar?.distM ?? 2;
-    if (!ref.current) return;
-    ref.current.scale.set(1, 1, d);
-    const hd = (st.heading * Math.PI) / 180;
-    ref.current.position.set(-4.2 + Math.sin(hd) * (d / 2), 1.15, 3.6 - Math.cos(hd) * (d / 2));
-    ref.current.rotation.set(0, hd, 0);
+    const s = effectiveSonar(st);
+    const d = s?.distM ?? null;
+    m.visible = d !== null;
+    if (d === null) return;
+    const h = (st.pose.headingDeg * Math.PI) / 180;
+    m.scale.set(1, 1, d);
+    m.position.set(st.pose.x + Math.sin(h) * (d / 2), st.pose.heightM - 0.2, st.pose.z + Math.cos(h) * (d / 2));
+    m.rotation.set(0, h, 0);
+    (m.material as THREE.MeshBasicMaterial).color.set(s?.source === "device" ? "#7dba9a" : "#8fb4b8");
   });
   return (
-    <mesh ref={ref}>
+    <mesh ref={ref} visible={false}>
       <boxGeometry args={[0.03, 0.03, 1]} />
-      <meshBasicMaterial color="#8fb4b8" transparent opacity={0.35} />
+      <meshBasicMaterial color="#8fb4b8" transparent opacity={0.5} />
     </mesh>
   );
 }
 
 function Observer() {
+  const body = useRef<THREE.Mesh>(null);
+  const wedge = useRef<THREE.Group>(null);
+  useFrame(() => {
+    const p = useRadar.getState().pose;
+    body.current?.position.set(p.x, p.heightM, p.z);
+    if (wedge.current) {
+      wedge.current.position.set(p.x, 0.05, p.z);
+      wedge.current.rotation.y = (p.headingDeg * Math.PI) / 180;
+    }
+  });
   return (
-    <mesh position={[-4.2, 1.35, 3.6]}>
-      <sphereGeometry args={[0.12, 16, 16]} />
-      <meshStandardMaterial color="#ece8e0" emissive="#8fb4b8" emissiveIntensity={0.6} />
-    </mesh>
+    <>
+      <mesh ref={body}>
+        <sphereGeometry args={[0.12, 16, 16]} />
+        <meshStandardMaterial color="#ece8e0" emissive="#8fb4b8" emissiveIntensity={0.6} />
+      </mesh>
+      {/* heading wedge on the floor: apex points along the camera heading */}
+      <group ref={wedge}>
+        <mesh position={[0, 0, 0.55]} rotation={[Math.PI / 2, 0, 0]}>
+          <coneGeometry args={[0.4, 1.1, 3]} />
+          <meshBasicMaterial color="#8fb4b8" transparent opacity={0.28} />
+        </mesh>
+      </group>
+    </>
   );
 }
 

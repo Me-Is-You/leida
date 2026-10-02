@@ -1,5 +1,4 @@
-import type { Detection, ObjectKind, SampleSource, Vec3 } from "./types";
-import type { FrameBlob } from "./device";
+import type { ObjectKind } from "./types";
 
 const COCO_KIND: Record<string, ObjectKind> = {
   person: "person",
@@ -47,164 +46,133 @@ export function kindOfClass(cls: string): ObjectKind {
   return COCO_KIND[cls] ?? (cls === "person" ? "person" : "device");
 }
 
-export function blobsToDetections(
-  blobs: FrameBlob[],
-  observer: Vec3,
-  source: SampleSource,
-): Detection[] {
-  return blobs.map((b, i) => {
-    const depth = Math.max(0.55, Math.min(9, 1.55 / Math.sqrt(b.area + 0.012)));
-    const px = (b.cx - 0.5) * depth * 1.35 + observer.x;
-    const py = Math.max(0, (0.55 - b.cy) * depth * 0.85);
-    const pz = observer.z - depth * 0.92;
-    return {
-      id: `vis-${i}-${b.cls}`,
-      cls: b.cls,
-      score: b.score,
-      bbox: [b.cx - b.w / 2, b.cy - b.h / 2, b.w, b.h],
-      depthM: depth,
-      world: { x: px, y: py, z: pz },
-      source,
-      kind: kindOfClass(b.cls),
-      contour: b.contour ?? boxContour(b.cx, b.cy, b.w, b.h),
-    };
-  });
-}
-
-export function boxContour(cx: number, cy: number, w: number, h: number): number[] {
-  const x0 = cx - w / 2;
-  const y0 = cy - h / 2;
-  const x1 = cx + w / 2;
-  const y1 = cy + h / 2;
-  return [x0, y0, x1, y0, x1, y1, x0, y1];
-}
-
-export function extractContour(
-  gray: Float32Array,
-  w: number,
-  h: number,
-  bbox: [number, number, number, number],
-): number[] {
-  const [bx, by, bw, bh] = bbox;
-  const x0 = Math.max(1, Math.floor(bx * w));
-  const y0 = Math.max(1, Math.floor(by * h));
-  const x1 = Math.min(w - 2, Math.ceil((bx + bw) * w));
-  const y1 = Math.min(h - 2, Math.ceil((by + bh) * h));
-  const pts: number[] = [];
-  const push = (x: number, y: number) => {
-    pts.push(x / w, y / h);
-  };
-  for (let x = x0; x <= x1; x += 2) {
-    for (let y = y0; y <= y1; y++) {
-      const g = gray[y * w + x] ?? 0;
-      const n = gray[(y - 1) * w + x] ?? g;
-      if (Math.abs(g - n) > 26) {
-        push(x, y);
-        break;
-      }
-    }
-  }
-  for (let y = y0; y <= y1; y += 2) {
-    for (let x = x1; x >= x0; x--) {
-      const g = gray[y * w + x] ?? 0;
-      const n = gray[y * w + x + 1] ?? g;
-      if (Math.abs(g - n) > 26) {
-        push(x, y);
-        break;
-      }
-    }
-  }
-  if (pts.length < 6) return boxContour(bx + bw / 2, by + bh / 2, bw, bh);
-  return pts;
+/** Raw detector output, normalised to 0‥1 of the video frame. */
+export interface RawDet {
+  cls: string;
+  score: number;
+  bbox: [number, number, number, number];
 }
 
 type CocoModel = {
-  detect: (src: HTMLVideoElement) => Promise<Array<{ class: string; score: number; bbox: [number, number, number, number] }>>;
+  detect: (
+    src: HTMLVideoElement,
+    maxDetections?: number,
+    minScore?: number,
+  ) => Promise<Array<{ class: string; score: number; bbox: [number, number, number, number] }>>;
 };
 
 let coco: CocoModel | null = null;
 let cocoStatus: "idle" | "loading" | "ready" | "fail" = "idle";
+let cocoPromise: Promise<boolean> | null = null;
+let cocoSource: "local" | "cdn" | "none" = "none";
 
 export function cocoState() {
   return cocoStatus;
 }
 
-export async function loadCoco(): Promise<boolean> {
-  if (coco) return true;
-  if (typeof window === "undefined") return false;
-  if (cocoStatus === "loading") return false;
-  cocoStatus = "loading";
-  try {
-    const tf = await import("@tensorflow/tfjs");
-    await tf.setBackend("webgl").catch(() => tf.setBackend("cpu"));
-    await tf.ready();
-    const mod = await import("@tensorflow-models/coco-ssd");
-    coco = (await mod.load({ base: "lite_mobilenet_v2" })) as unknown as CocoModel;
-    cocoStatus = "ready";
-    return true;
-  } catch {
-    cocoStatus = "fail";
-    coco = null;
-    return false;
-  }
+export function cocoModelSource() {
+  return cocoSource;
 }
 
-export async function detectCoco(
-  video: HTMLVideoElement,
-  observer: Vec3,
-): Promise<Detection[] | null> {
+const LOCAL_MODEL = "/vendor/coco-ssd/model.json";
+
+/** Loads the self-hosted COCO-SSD; only if that is missing does it try the library default host. */
+export function loadCoco(): Promise<boolean> {
+  if (coco) return Promise.resolve(true);
+  if (typeof window === "undefined") return Promise.resolve(false);
+  if (cocoPromise) return cocoPromise;
+  cocoStatus = "loading";
+  cocoPromise = (async () => {
+    try {
+      const tf = await import("@tensorflow/tfjs");
+      await tf.setBackend("webgl").catch(() => tf.setBackend("cpu"));
+      await tf.ready();
+      const mod = await import("@tensorflow-models/coco-ssd");
+      try {
+        coco = (await mod.load({ modelUrl: LOCAL_MODEL })) as unknown as CocoModel;
+        cocoSource = "local";
+      } catch {
+        coco = (await mod.load({ base: "lite_mobilenet_v2" })) as unknown as CocoModel;
+        cocoSource = "cdn";
+      }
+      cocoStatus = "ready";
+      return true;
+    } catch {
+      cocoStatus = "fail";
+      coco = null;
+      cocoPromise = null; // allow a retry
+      return false;
+    }
+  })();
+  return cocoPromise;
+}
+
+/** Runs the detector on the live <video>. Returns null when not ready. */
+export async function detectCoco(video: HTMLVideoElement, minScore: number): Promise<RawDet[] | null> {
   if (!coco || video.readyState < 2) return null;
+  const vw = video.videoWidth || 1;
+  const vh = video.videoHeight || 1;
   try {
-    const raw = await coco.detect(video);
-    const vw = video.videoWidth || 1;
-    const vh = video.videoHeight || 1;
-    return raw.slice(0, 12).map((d, i) => {
-      const [x, y, bw, bh] = d.bbox;
-      const nx = x / vw;
-      const ny = y / vh;
-      const nw = bw / vw;
-      const nh = bh / vh;
-      const area = nw * nh;
-      const depth = Math.max(0.5, Math.min(10, 1.7 / Math.sqrt(area + 0.01)));
-      return {
-        id: `coco-${i}-${d.class}`,
+    const raw = await coco.detect(video, 20, minScore);
+    return raw
+      .filter((d) => d.score >= minScore)
+      .map((d) => ({
         cls: d.class,
         score: d.score,
-        bbox: [nx, ny, nw, nh] as [number, number, number, number],
-        depthM: depth,
-        world: {
-          x: (nx + nw / 2 - 0.5) * depth * 1.35 + observer.x,
-          y: Math.max(0, (0.55 - (ny + nh / 2)) * depth * 0.85),
-          z: observer.z - depth * 0.92,
-        },
-        source: "device" as const,
-        kind: kindOfClass(d.class),
-        contour: boxContour(nx + nw / 2, ny + nh / 2, nw, nh),
-      };
-    });
+        bbox: [d.bbox[0] / vw, d.bbox[1] / vh, d.bbox[2] / vw, d.bbox[3] / vh] as [number, number, number, number],
+      }));
   } catch {
     return null;
   }
 }
 
-export async function runOcr(canvas: HTMLCanvasElement): Promise<string> {
-  const T = (window as unknown as { Tesseract?: { recognize: (src: HTMLCanvasElement, lang: string) => Promise<{ data: { text: string } }> } }).Tesseract;
-  if (T) {
-    const r = await T.recognize(canvas, "chi_sim+eng");
-    return (r.data.text || "").trim();
-  }
-  return "";
+export function boxContour(x: number, y: number, w: number, h: number): number[] {
+  return [x, y, x + w, y, x + w, y + h, x, y + h];
 }
 
-export function injectTesseract(): Promise<boolean> {
-  if (typeof window === "undefined") return Promise.resolve(false);
-  if ((window as unknown as { Tesseract?: unknown }).Tesseract) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const s = document.createElement("script");
-    s.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
-    s.async = true;
-    s.onload = () => resolve(true);
-    s.onerror = () => resolve(false);
-    document.head.appendChild(s);
-  });
+// ───────────────────────── OCR (self-hosted tesseract.js) ─────────────────────────
+
+type OcrWorker = {
+  recognize: (img: HTMLCanvasElement) => Promise<{ data: { text: string; confidence: number } }>;
+  terminate: () => Promise<unknown>;
+};
+
+let ocrWorker: OcrWorker | null = null;
+let ocrLang = "";
+let ocrBusy = false;
+
+export function ocrBusyNow() {
+  return ocrBusy;
+}
+
+export async function runOcr(
+  canvas: HTMLCanvasElement,
+  lang: "eng" | "chi_sim+eng",
+): Promise<{ text: string; confidence: number }> {
+  if (ocrBusy) return { text: "", confidence: 0 };
+  ocrBusy = true;
+  try {
+    if (!ocrWorker || ocrLang !== lang) {
+      await ocrWorker?.terminate();
+      const T = await import("tesseract.js");
+      ocrWorker = (await T.createWorker(lang, 1, {
+        workerPath: "/vendor/tesseract/worker.min.js",
+        corePath: "/vendor/tesseract",
+        langPath: "/vendor/tesseract/lang",
+        gzip: true,
+      })) as unknown as OcrWorker;
+      ocrLang = lang;
+    }
+    const r = await ocrWorker.recognize(canvas);
+    return { text: (r.data.text || "").trim(), confidence: r.data.confidence ?? 0 };
+  } finally {
+    ocrBusy = false;
+  }
+}
+
+export async function disposeOcr() {
+  const w = ocrWorker;
+  ocrWorker = null;
+  ocrLang = "";
+  await w?.terminate();
 }

@@ -11,10 +11,29 @@ import { useRadar } from "@/lib/radar-store";
 
 export const Route = createFileRoute("/hardware")({ component: HardwarePage });
 
+const SENSOR_LABEL: Record<string, string> = {
+  camera: "相机",
+  mic: "麦克风 / 声呐",
+  imu: "IMU 运动",
+  orient: "方向 / 罗盘",
+  mag: "磁力计",
+  light: "环境光",
+  geo: "定位 GNSS",
+  bt: "蓝牙",
+};
+const STATE_LABEL: Record<string, string> = {
+  off: "未启用",
+  pending: "等待读数",
+  live: "实时",
+  denied: "已拒绝",
+  unsupported: "不支持",
+  error: "无读数",
+};
+
 function HardwarePage() {
   const capabilities = useRadar((s) => s.capabilities);
   const fullCheck = useRadar((s) => s.fullCheck);
-  const realFlags = useRadar((s) => s.realFlags);
+  const sensors = useRadar((s) => s.sensors);
   const fps = useRadar((s) => s.fps);
   const latencyUs = useRadar((s) => s.latencyUs);
   const [runtime, setRuntime] = useState<ReturnType<typeof hostRuntime> | null>(null);
@@ -26,7 +45,8 @@ function HardwarePage() {
     if (!capabilities.length) fullCheck();
   }, [capabilities.length, fullCheck]);
 
-  const realCount = Object.values(realFlags).filter(Boolean).length;
+  const entries = Object.entries(sensors);
+  const realCount = entries.filter(([, s]) => s.state === "live").length;
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 py-5 lg:px-6">
@@ -43,8 +63,8 @@ function HardwarePage() {
 
       <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
         <Metric label="型号" value={DEVICE.model} hint={DEVICE.code} />
-        <Metric label="真实通道" value={`${realCount}/8`} accent={realCount > 0} />
-        <Metric label="融合 FPS" value={fps.toFixed(0)} hint={`${latencyUs.toFixed(0)} μs`} />
+        <Metric label="真实通道" value={`${realCount}/${entries.length}`} accent={realCount > 0} hint="读数在流动" />
+        <Metric label="主循环" value={`${fps.toFixed(0)} Hz`} hint={`单帧 ${latencyUs.toFixed(0)} μs`} />
         <Metric
           label="电量"
           value={battery ? `${Math.round(battery.level * 100)}%` : "—"}
@@ -54,7 +74,28 @@ function HardwarePage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>机身</CardTitle>
+          <CardTitle>传感器通道状态</CardTitle>
+          <CardHint>实时测量</CardHint>
+        </CardHeader>
+        <ul className="grid gap-2 sm:grid-cols-2">
+          {entries.map(([id, s]) => (
+            <li key={id} className="flex items-start justify-between gap-3 rounded-md bg-raised px-3 py-2">
+              <div className="min-w-0">
+                <div className="text-sm">{SENSOR_LABEL[id] ?? id}</div>
+                <div className="truncate text-[11px] text-faint">{s.note || (s.state === "live" ? "正常" : "—")}</div>
+              </div>
+              <div className="shrink-0 text-right">
+                <Badge tone={s.state === "live" ? "live" : s.state === "pending" ? "accent" : s.state === "off" ? "mute" : "warn"}>{STATE_LABEL[s.state]}</Badge>
+                <div className="mt-0.5 font-mono text-[11px] text-faint tabular">{s.state === "live" ? `${s.hz} Hz` : ""}</div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>机身（出厂规格，非实时）</CardTitle>
           <CardHint>{DEVICE.os}</CardHint>
         </CardHeader>
         <dl className="grid gap-2 text-sm sm:grid-cols-2">

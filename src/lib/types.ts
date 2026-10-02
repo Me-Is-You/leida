@@ -1,4 +1,6 @@
-export type SampleSource = "device" | "twin";
+/** device = real sensor/measurement, twin = simulated (demo), none = no data (shown as "—"). */
+export type SampleSource = "device" | "twin" | "none";
+export type DataMode = "demo" | "real";
 export type EnvMode =
   | "indoor"
   | "outdoor"
@@ -18,6 +20,16 @@ export type ObjectKind =
   | "wall"
   | "vehicle"
   | "animal";
+export type SensorId = "camera" | "mic" | "imu" | "orient" | "mag" | "light" | "geo" | "bt";
+export interface SensorStatus {
+  state: "off" | "pending" | "live" | "denied" | "unsupported" | "error";
+  /** Measured readings per second. */
+  hz: number;
+  /** Milliseconds since the last reading (performance.now based), or null. */
+  lastMs: number | null;
+  note: string;
+}
+
 export type LogLevel = "INFO" | "DETECT" | "WARN" | "REAL";
 export type ModelStatus = "idle" | "loading" | "ready" | "fallback";
 export type CameraFacing = "environment" | "user";
@@ -31,6 +43,11 @@ export interface Vec3 {
 
 export interface Detection {
   id: string;
+  trackId?: number;
+  /** 1σ depth uncertainty (m). */
+  sigmaM?: number;
+  depthBasis?: string;
+  truncated?: boolean;
   cls: string;
   score: number;
   bbox: [number, number, number, number];
@@ -41,12 +58,23 @@ export interface Detection {
   contour: number[];
 }
 
+export interface Pose {
+  x: number;
+  z: number;
+  headingDeg: number;
+  pitchDeg: number;
+  heightM: number;
+  steps: number;
+  source: SampleSource;
+}
+
 export interface PersonTrack {
   id: string;
   name: string;
   pos: Vec3;
   heading: number;
-  bpm: number;
+  /** Breathing rate — only the demo twin has one; real tracks are null. */
+  bpm: number | null;
   confidence: number;
   source: SampleSource;
   behindWall: boolean;
@@ -82,7 +110,7 @@ export interface OccupancyCell {
 export interface BtDevice {
   id: string;
   name: string;
-  rssi: number;
+  rssi: number | null;
   source: SampleSource;
 }
 
@@ -101,12 +129,25 @@ export interface Capability {
 
 export interface SonarPing {
   t: number;
-  distM: number;
+  /** null = no valid echo (never a made-up number). */
+  distM: number | null;
+  status: "ok" | "no-echo" | "no-direct" | "error";
+  message: string;
+  snrDb: number;
+  confidence: number;
+  directSnrDb: number;
   peak: number;
-  lagSamples: number;
-  dtUs: number;
+  lagSamples: number | null;
+  dtUs: number | null;
+  /** Number of pings averaged / accepted. */
+  pings: number;
+  accepted: number;
+  sigmaM: number | null;
+  echoes: { distM: number; snrDb: number }[];
   source: SampleSource;
   trace: number[];
+  /** Mic constraint report (echoCancellation etc.) — false is what we want. */
+  micRaw: boolean | null;
 }
 
 export interface MagSample {

@@ -1,27 +1,15 @@
+import { compassHeading, cameraPitchDeg } from "./core/compass.ts";
 import type { Capability, GeoSample, ImuSample, MagSample } from "./types";
 
-type MagCtor = new (opts?: { frequency?: number }) => {
-  x: number;
-  y: number;
-  z: number;
+type SensorCtor<T> = new (opts?: { frequency?: number }) => T & {
   start: () => void;
   stop: () => void;
   addEventListener: (type: string, fn: () => void) => void;
 };
-
-type LightCtor = new (opts?: { frequency?: number }) => {
-  illuminance: number;
-  start: () => void;
-  stop: () => void;
-  addEventListener: (type: string, fn: () => void) => void;
-};
+type MagLike = SensorCtor<{ x: number; y: number; z: number }>;
+type LightLike = SensorCtor<{ illuminance: number }>;
 
 let cameraStream: MediaStream | null = null;
-let audioStream: MediaStream | null = null;
-let magSensor: { stop: () => void } | null = null;
-let lightSensor: { stop: () => void } | null = null;
-let motionHooked = false;
-let orientHooked = false;
 let prevGray: Float32Array | null = null;
 
 export function getCameraStream() {
@@ -29,17 +17,34 @@ export function getCameraStream() {
 }
 
 export async function startCamera(facing: "environment" | "user" = "environment"): Promise<MediaStream> {
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error("此浏览器不支持相机 (需要 HTTPS)");
+  // Release the old track *before* asking for the new one: many phones cannot
+  // open two cameras at once (the cause of the black screen when flipping).
   stopCamera();
-  cameraStream = await navigator.mediaDevices.getUserMedia({
-    video: {
-      facingMode: { ideal: facing },
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
-      frameRate: { ideal: 30 },
-    },
-    audio: false,
-  });
-  return cameraStream;
+  await new Promise((r) => setTimeout(r, 80));
+  const tries: MediaStreamConstraints[] = [
+    { video: { facingMode: { exact: facing }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }, audio: false },
+    { video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
+    { video: true, audio: false },
+  ];
+  let lastErr: unknown;
+  for (const c of tries) {
+    try {
+      cameraStream = await navigator.mediaDevices.getUserMedia(c);
+      return cameraStream;
+    } catch (e) {
+      lastErr = e;
+      if (e instanceof DOMException && (e.name === "NotAllowedError" || e.name === "SecurityError")) break;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("相机不可用");
+}
+
+export function cameraSettings(): { width: number; height: number; fps: number; facing: string } | null {
+  const t = cameraStream?.getVideoTracks()[0];
+  if (!t) return null;
+  const s = t.getSettings();
+  return { width: s.width ?? 0, height: s.height ?? 0, fps: s.frameRate ?? 0, facing: s.facingMode ?? "?" };
 }
 
 export function stopCamera() {
@@ -84,71 +89,64 @@ export async function setZoom(value: number): Promise<boolean> {
   }
 }
 
-export async function startMic(): Promise<MediaStream> {
-  if (audioStream) return audioStream;
-  audioStream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-    video: false,
-  });
-  return audioStream;
-}
+export type StopFn = () => void;
+const noop: StopFn = () => undefined;
 
-export function stopMic() {
-  audioStream?.getTracks().forEach((t) => t.stop());
-  audioStream = null;
-}
-
-export async function startMagnetometer(onReading: (s: MagSample) => void): Promise<boolean> {
-  const Mag = (window as unknown as { Magnetometer?: MagCtor }).Magnetometer;
-  if (!Mag) return false;
+export async function startMagnetometer(onReading: (s: MagSample) => void, hz = 20): Promise<StopFn | null> {
+  const Mag = (window as unknown as { Magnetometer?: MagLike }).Magnetometer;
+  if (!Mag) return null;
   try {
     const perm = await navigator.permissions.query({ name: "magnetometer" as PermissionName });
-    if (perm.state === "denied") return false;
+    if (perm.state === "denied") return null;
   } catch {
     /* some browsers omit this permission name */
   }
   try {
-    const mag = new Mag({ frequency: 20 });
+    const mag = new Mag({ frequency: hz });
     mag.addEventListener("reading", () => {
       const x = mag.x ?? 0;
       const y = mag.y ?? 0;
       const z = mag.z ?? 0;
-      const m = Math.sqrt(x * x + y * y + z * z);
-      onReading({ x, y, z, mag: m, anomaly: m > 65, source: "device" });
+      onReading({ x, y, z, mag: Math.sqrt(x * x + y * y + z * z), anomaly: false, source: "device" });
     });
+    mag.addEventListener("error", () => undefined);
     mag.start();
-    magSensor = mag;
-    return true;
+    return () => mag.stop();
   } catch {
-    return false;
+    return null;
   }
 }
 
-export function stopMagnetometer() {
-  magSensor?.stop();
-  magSensor = null;
-}
-
-export async function startAmbientLight(onLux: (lux: number) => void): Promise<boolean> {
-  const Light = (window as unknown as { AmbientLightSensor?: LightCtor }).AmbientLightSensor;
-  if (!Light) return false;
+export async function startAmbientLight(onLux: (lux: number) => void): Promise<StopFn | null> {
+  const Light = (window as unknown as { AmbientLightSensor?: LightLike }).AmbientLightSensor;
+  if (!Light) return null;
   try {
     const s = new Light({ frequency: 5 });
     s.addEventListener("reading", () => onLux(s.illuminance ?? 0));
+    s.addEventListener("error", () => undefined);
     s.start();
-    lightSensor = s;
-    return true;
+    return () => s.stop();
   } catch {
-    return false;
+    return null;
   }
 }
 
+/** iOS needs an explicit permission call from a user gesture; Android resolves true. */
 export async function requestMotionPermission(): Promise<boolean> {
-  const DM = DeviceMotionEvent as unknown as { requestPermission?: () => Promise<string> };
+  const DM = (typeof DeviceMotionEvent !== "undefined" ? DeviceMotionEvent : null) as unknown as {
+    requestPermission?: () => Promise<string>;
+  } | null;
+  const DO = (typeof DeviceOrientationEvent !== "undefined" ? DeviceOrientationEvent : null) as unknown as {
+    requestPermission?: () => Promise<string>;
+  } | null;
   try {
-    if (typeof DM.requestPermission === "function") {
+    if (DM && typeof DM.requestPermission === "function") {
       const r = await DM.requestPermission();
-      return r === "granted";
+      if (r !== "granted") return false;
+    }
+    if (DO && typeof DO.requestPermission === "function") {
+      const r = await DO.requestPermission();
+      if (r !== "granted") return false;
     }
   } catch {
     return false;
@@ -156,39 +154,61 @@ export async function requestMotionPermission(): Promise<boolean> {
   return true;
 }
 
-export function startImu(onReading: (s: ImuSample) => void): boolean {
-  if (motionHooked) return true;
+export interface MotionEvt extends ImuSample {
+  /** Event time in seconds (performance.now based). */
+  tSec: number;
+}
+
+export function startImu(onReading: (s: MotionEvt) => void): StopFn {
+  if (typeof window === "undefined" || !("DeviceMotionEvent" in window)) return noop;
   const handler = (e: DeviceMotionEvent) => {
     const a = e.accelerationIncludingGravity;
     const g = e.rotationRate;
-    if (!a) return;
+    if (!a || a.x == null || a.y == null || a.z == null) return;
     onReading({
-      ax: a.x ?? 0,
-      ay: a.y ?? 0,
-      az: a.z ?? 0,
-      gx: g?.alpha ?? 0,
-      gy: g?.beta ?? 0,
-      gz: g?.gamma ?? 0,
+      ax: a.x,
+      ay: a.y,
+      az: a.z,
+      // W3C: rotationRate.alpha = about z, beta = about x, gamma = about y (deg/s)
+      gx: g?.beta ?? 0,
+      gy: g?.gamma ?? 0,
+      gz: g?.alpha ?? 0,
       heading: 0,
       source: "device",
+      tSec: performance.now() / 1000,
     });
   };
   window.addEventListener("devicemotion", handler);
-  motionHooked = true;
-  return true;
+  return () => window.removeEventListener("devicemotion", handler);
 }
 
-export function startOrientation(onHeading: (deg: number) => void): boolean {
-  if (orientHooked) return true;
+export interface OrientEvt {
+  /** Compass heading of the BACK camera axis, deg clockwise from north. */
+  heading: number;
+  /** Elevation of the back camera axis above the horizon, deg. */
+  pitch: number;
+  /** True when the heading is referenced to magnetic north (not an arbitrary start). */
+  absolute: boolean;
+}
+
+export function startOrientation(on: (o: OrientEvt) => void): StopFn {
+  if (typeof window === "undefined" || !("DeviceOrientationEvent" in window)) return noop;
+  const hasAbs = "ondeviceorientationabsolute" in window;
   const handler = (e: DeviceOrientationEvent) => {
-    const abs = (e as DeviceOrientationEvent & { webkitCompassHeading?: number }).webkitCompassHeading;
-    const alpha = e.alpha;
-    const heading = typeof abs === "number" ? abs : alpha ?? 0;
-    onHeading(heading);
+    const wk = (e as DeviceOrientationEvent & { webkitCompassHeading?: number }).webkitCompassHeading;
+    if (e.beta == null || e.gamma == null) return;
+    const pitch = cameraPitchDeg(e.beta, e.gamma);
+    if (typeof wk === "number" && Number.isFinite(wk)) {
+      // iOS: already tilt-compensated compass heading, magnetic north referenced.
+      on({ heading: wk, pitch, absolute: true });
+      return;
+    }
+    if (e.alpha == null) return;
+    on({ heading: compassHeading(e.alpha, e.beta, e.gamma), pitch, absolute: e.absolute === true || hasAbs });
   };
-  window.addEventListener("deviceorientation", handler);
-  orientHooked = true;
-  return true;
+  const evt = hasAbs ? "deviceorientationabsolute" : "deviceorientation";
+  window.addEventListener(evt, handler as EventListener);
+  return () => window.removeEventListener(evt, handler as EventListener);
 }
 
 export async function readGeo(): Promise<GeoSample | null> {
@@ -203,14 +223,14 @@ export async function readGeo(): Promise<GeoSample | null> {
           source: "device",
         }),
       () => resolve(null),
-      { enableHighAccuracy: true, timeout: 4000, maximumAge: 8000 },
+      { enableHighAccuracy: true, timeout: 6000, maximumAge: 8000 },
     );
   });
 }
 
-export async function watchGeo(onPos: (g: GeoSample) => void): Promise<number | null> {
-  if (!("geolocation" in navigator)) return null;
-  return navigator.geolocation.watchPosition(
+export function watchGeo(onPos: (g: GeoSample) => void): StopFn {
+  if (!("geolocation" in navigator)) return noop;
+  const id = navigator.geolocation.watchPosition(
     (p) =>
       onPos({
         lat: p.coords.latitude,
@@ -221,35 +241,71 @@ export async function watchGeo(onPos: (g: GeoSample) => void): Promise<number | 
     () => undefined,
     { enableHighAccuracy: true, maximumAge: 2000 },
   );
+  return () => navigator.geolocation.clearWatch(id);
 }
 
-export async function scanBluetooth(): Promise<{ id: string; name: string; rssi: number } | null> {
-  const bt = navigator.bluetooth;
+export interface BtResult {
+  id: string;
+  name: string;
+  /** dBm, or null when the browser did not deliver an advertisement. */
+  rssi: number | null;
+}
+
+type BtDeviceLike = {
+  id: string;
+  name?: string;
+  watchAdvertisements?: (o?: { signal?: AbortSignal }) => Promise<void>;
+  addEventListener: (t: string, fn: (e: Event) => void) => void;
+  removeEventListener: (t: string, fn: (e: Event) => void) => void;
+};
+
+/** Must be called from a click. RSSI is only known if advertisements arrive within `waitMs`. */
+export async function scanBluetooth(waitMs = 3500): Promise<BtResult | null> {
+  const bt = (navigator as Navigator & { bluetooth?: { requestDevice: (o: unknown) => Promise<BtDeviceLike> } }).bluetooth;
   if (!bt) return null;
   try {
-    const device = await bt.requestDevice({
-      acceptAllDevices: true,
-      optionalServices: [],
-    });
-    return { id: device.id, name: device.name || "未命名设备", rssi: -55 };
+    const device = await bt.requestDevice({ acceptAllDevices: true, optionalServices: [] });
+    let rssi: number | null = null;
+    if (typeof device.watchAdvertisements === "function") {
+      const ac = new AbortController();
+      const on = (e: Event) => {
+        const r = (e as Event & { rssi?: number }).rssi;
+        if (typeof r === "number") rssi = r;
+      };
+      device.addEventListener("advertisementreceived", on);
+      try {
+        await device.watchAdvertisements({ signal: ac.signal });
+        await new Promise((r) => setTimeout(r, waitMs));
+      } catch {
+        /* unsupported / blocked */
+      } finally {
+        ac.abort();
+        device.removeEventListener("advertisementreceived", on);
+      }
+    }
+    return { id: device.id, name: device.name || "未命名设备", rssi };
   } catch {
     return null;
   }
 }
 
-export async function detectBarcodes(source: CanvasImageSource): Promise<string[]> {
-  const BD = (
-    window as unknown as {
-      BarcodeDetector?: new (opts: { formats: string[] }) => {
-        detect: (src: CanvasImageSource) => Promise<Array<{ rawValue: string }>>;
-      };
-    }
-  ).BarcodeDetector;
-  if (!BD) return [];
+type BarcodeDetectorLike = { detect: (src: CanvasImageSource) => Promise<Array<{ rawValue: string; format?: string }>> };
+let barcodeDetector: BarcodeDetectorLike | null = null;
+
+export function barcodeSupported(): boolean {
+  return typeof window !== "undefined" && "BarcodeDetector" in window;
+}
+
+/** Scans `source` at its native resolution (pass the <video>, not a 96×72 thumbnail). */
+export async function detectBarcodes(source: CanvasImageSource): Promise<{ value: string; format: string }[]> {
+  if (!barcodeSupported()) return [];
   try {
-    const det = new BD({ formats: ["qr_code", "ean_13", "code_128", "aztec"] });
-    const codes = await det.detect(source);
-    return codes.map((c) => c.rawValue).filter(Boolean);
+    if (!barcodeDetector) {
+      const BD = (window as unknown as { BarcodeDetector: new (o?: { formats: string[] }) => BarcodeDetectorLike }).BarcodeDetector;
+      barcodeDetector = new BD();
+    }
+    const codes = await barcodeDetector.detect(source);
+    return codes.filter((c) => c.rawValue).map((c) => ({ value: c.rawValue, format: c.format ?? "?" }));
   } catch {
     return [];
   }
@@ -315,8 +371,8 @@ export function probeCapabilities(): Capability[] {
     {
       id: "torch",
       label: "手电筒 torch",
-      available: true,
-      note: "需相机轨道支持 torch 约束",
+      available: !!videoCapabilities()?.torch,
+      note: "需相机开启且镜头轨道支持 torch 约束",
     },
     {
       id: "wifi",
@@ -343,6 +399,12 @@ export function probeCapabilities(): Capability[] {
       note: "需 OTG 外设",
     },
     {
+      id: "secure",
+      label: "安全上下文 HTTPS",
+      available: typeof window !== "undefined" && window.isSecureContext,
+      note: "相机 / 麦克风 / 传感器 / 蓝牙均要求 HTTPS 或 localhost",
+    },
+    {
       id: "perf",
       label: "performance.now",
       available: has("performance"),
@@ -357,136 +419,55 @@ export function probeCapabilities(): Capability[] {
   ];
 }
 
-export interface FrameBlob {
-  cx: number;
-  cy: number;
-  w: number;
-  h: number;
-  area: number;
-  aspect: number;
-  cls: string;
-  score: number;
-  contour?: number[];
-}
-
 export interface FrameMetrics {
+  /** Mean luma 0–255 of a 96×72 thumbnail. */
   brightness: number;
+  /** Edge density 0–1. */
   texture: number;
+  /** Luma standard deviation (global contrast, not sensor noise). */
   noise: number;
+  /** Mean absolute frame difference 0–1. */
   motion: number;
-  blobs: FrameBlob[];
-  gray: Float32Array;
-  width: number;
-  height: number;
 }
 
-export function analyzeFrame(video: HTMLVideoElement, canvas: HTMLCanvasElement): FrameMetrics {
-  const w = 96;
-  const h = 72;
-  canvas.width = w;
-  canvas.height = h;
+const TW = 96;
+const TH = 72;
+
+/** Cheap global image statistics for environment classification. Returns null when no frame is ready. */
+export function analyzeFrame(video: HTMLVideoElement, canvas: HTMLCanvasElement): FrameMetrics | null {
+  if (video.readyState < 2 || !video.videoWidth) return null;
+  canvas.width = TW;
+  canvas.height = TH;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  const empty: FrameMetrics = {
-    brightness: 80,
-    texture: 0.2,
-    noise: 10,
-    motion: 0,
-    blobs: [],
-    gray: new Float32Array(w * h),
-    width: w,
-    height: h,
-  };
-  if (!ctx || video.readyState < 2) return empty;
-  ctx.drawImage(video, 0, 0, w, h);
-  const img = ctx.getImageData(0, 0, w, h);
-  const d = img.data;
+  if (!ctx) return null;
+  ctx.drawImage(video, 0, 0, TW, TH);
+  const d = ctx.getImageData(0, 0, TW, TH).data;
+  const gray = new Float32Array(TW * TH);
   let sum = 0;
   let edge = 0;
-  const gray = new Float32Array(w * h);
   for (let i = 0, p = 0; i < d.length; i += 4, p++) {
-    const g = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+    const g = 0.2126 * (d[i] as number) + 0.7152 * (d[i + 1] as number) + 0.0722 * (d[i + 2] as number);
     gray[p] = g;
     sum += g;
-    if (p > 0 && Math.abs(g - (gray[p - 1] ?? g)) > 28) edge++;
+    if (p % TW > 0 && Math.abs(g - (gray[p - 1] as number)) > 28) edge++;
   }
-  const brightness = sum / (w * h);
-  const texture = edge / (w * h);
+  const brightness = sum / gray.length;
+  const texture = edge / gray.length;
   let varSum = 0;
-  for (let i = 0; i < gray.length; i++) varSum += ((gray[i] ?? 0) - brightness) ** 2;
+  for (let i = 0; i < gray.length; i++) varSum += ((gray[i] as number) - brightness) ** 2;
   const noise = Math.sqrt(varSum / gray.length);
-
   let motion = 0;
   if (prevGray && prevGray.length === gray.length) {
     let md = 0;
-    for (let i = 0; i < gray.length; i += 2) md += Math.abs((gray[i] ?? 0) - (prevGray[i] ?? 0));
-    motion = md / (gray.length * 0.5 * 255);
+    for (let i = 0; i < gray.length; i++) md += Math.abs((gray[i] as number) - (prevGray[i] as number));
+    motion = md / (gray.length * 255);
   }
-  prevGray = gray.slice();
-
-  const blobs = extractBlobs(gray, w, h);
-  return { brightness, texture, noise, motion, blobs, gray, width: w, height: h };
+  prevGray = gray;
+  return { brightness, texture, noise, motion };
 }
 
-function extractBlobs(gray: Float32Array, w: number, h: number): FrameBlob[] {
-  const mean = gray.reduce((s, v) => s + v, 0) / gray.length;
-  const mask = new Uint8Array(w * h);
-  for (let i = 0; i < gray.length; i++) mask[i] = Math.abs((gray[i] ?? 0) - mean) > 28 ? 1 : 0;
-  const seen = new Uint8Array(w * h);
-  const blobs: FrameBlob[] = [];
-  const stack: number[] = [];
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x;
-      if (!mask[i] || seen[i]) continue;
-      stack.length = 0;
-      stack.push(i);
-      seen[i] = 1;
-      let minX = x,
-        maxX = x,
-        minY = y,
-        maxY = y,
-        n = 0;
-      while (stack.length) {
-        const p = stack.pop()!;
-        n++;
-        const px = p % w;
-        const py = (p / w) | 0;
-        if (px < minX) minX = px;
-        if (px > maxX) maxX = px;
-        if (py < minY) minY = py;
-        if (py > maxY) maxY = py;
-        const nbs = [p - 1, p + 1, p - w, p + w];
-        for (const q of nbs) {
-          if (q < 0 || q >= mask.length || seen[q] || !mask[q]) continue;
-          seen[q] = 1;
-          stack.push(q);
-        }
-      }
-      const bw = maxX - minX + 1;
-      const bh = maxY - minY + 1;
-      const area = n / (w * h);
-      if (area < 0.012 || bw < 3 || bh < 3) continue;
-      const aspect = bh / Math.max(bw, 1);
-      let cls = "object";
-      let score = 0.55 + Math.min(0.3, area * 2);
-      if (aspect > 1.45 && area > 0.03 && area < 0.45) {
-        cls = "person";
-        score = 0.62 + Math.min(0.28, aspect / 8);
-      }
-      blobs.push({
-        cx: (minX + maxX) / 2 / w,
-        cy: (minY + maxY) / 2 / h,
-        w: bw / w,
-        h: bh / h,
-        area,
-        aspect,
-        cls,
-        score,
-      });
-    }
-  }
-  blobs.sort((a, b) => b.area - a.area);
-  return blobs.slice(0, 8);
+export function resetFrameHistory() {
+  prevGray = null;
 }
 
 export function hostRuntime() {

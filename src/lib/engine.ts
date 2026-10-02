@@ -1,15 +1,16 @@
-import { clamp, dist3, lerp } from "./utils";
+import { mulberry32 } from "./core/math.ts";
+import type { PointCloud } from "./core/cloud.ts";
+import { TRACE_BINS } from "./core/sonar-core.ts";
+import { clamp, dist3 } from "./utils";
 import type {
-  Detection,
-  EnvManual,
   EnvMode,
   FusionWeights,
   GeoSample,
   ImuSample,
   MagSample,
-  MapPoint,
   PersonTrack,
   SampleSource,
+  SonarPing,
   SceneObject,
   Vec3,
   WifiSample,
@@ -20,6 +21,17 @@ export const AP: Vec3 = { x: -5.4, y: 1.15, z: -3.8 };
 export const WALL_X = 3.2;
 
 const SOUND_MPS = 343;
+
+/**
+ * The digital twin is DEMO data. It is deterministic (seeded) so screenshots,
+ * tests and bug reports are reproducible; call resetTwin() to restart it.
+ */
+let rng = mulberry32(20260101);
+export function resetTwin(seed = 20260101) {
+  rng = mulberry32(seed);
+  rssiWindow.length = 0;
+  magWindow.length = 0;
+}
 
 export interface TwinState {
   t: number;
@@ -33,7 +45,6 @@ export interface TwinState {
   brightness: number;
   texture: number;
   noise: number;
-  env: EnvMode;
 }
 
 const OBJECTS: SceneObject[] = [
@@ -118,7 +129,7 @@ function wifiAt(observer: Vec3, movers: Vec3[]): WifiSample {
       rssi -= fade * (0.4 + 0.6 * Math.sin(md));
     }
   }
-  rssi += (Math.random() - 0.5) * 0.7;
+  rssi += (rng() - 0.5) * 0.7;
   rssiWindow.push(rssi);
   if (rssiWindow.length > 24) rssiWindow.shift();
   const mean = rssiWindow.reduce((s, v) => s + v, 0) / rssiWindow.length;
@@ -188,7 +199,7 @@ function rayRange(origin: Vec3, heading: number): number {
       if (along < best) best = along;
     }
   }
-  return clamp(best + (Math.random() - 0.5) * 0.012, 0.08, 8);
+  return clamp(best + (rng() - 0.5) * 0.012, 0.08, 8);
 }
 
 function raySeg(
@@ -211,16 +222,6 @@ function raySeg(
   return null;
 }
 
-function classifyEnv(brightness: number, texture: number, noise: number, wifi: WifiSample): EnvMode {
-  if (wifi.throughWall && wifi.sigma > 2.5) return "through";
-  if (noise > 42) return "noisy";
-  if (brightness < 35) return "lowlight";
-  if (brightness > 180) return "bright";
-  if (texture > 0.45) return "clutter";
-  if (brightness > 125 && texture < 0.18) return "outdoor";
-  return "indoor";
-}
-
 export function observerPose(t: number, headingOverride?: number): { pos: Vec3; heading: number } {
   const heading = headingOverride ?? 0.15 * Math.sin(t * 0.11);
   const walk = 0.35 * Math.sin(t * 0.07);
@@ -230,12 +231,7 @@ export function observerPose(t: number, headingOverride?: number): { pos: Vec3; 
   };
 }
 
-export function stepTwin(
-  t: number,
-  envManual: EnvManual,
-  vision?: { brightness: number; texture: number; noise: number },
-  headingOverride?: number,
-): TwinState {
+export function stepTwin(t: number, headingOverride?: number): TwinState {
   const people: PersonTrack[] = ACTORS.map((a) => {
     const pos = actorPos(a, t);
     const bpm = 14 + 2.2 * Math.sin(t * 0.33 + a.phase) + (a.gait === "orbit" ? 4 : 0);
@@ -259,11 +255,9 @@ export function stepTwin(
   const mag = magAt(obs.pos, t);
   const sonarM = rayRange(obs.pos, obs.heading);
 
-  const brightness = vision?.brightness ?? 78 + 18 * Math.sin(t * 0.05);
-  const texture = vision?.texture ?? 0.22 + 0.04 * Math.sin(t * 0.2);
-  const noise = vision?.noise ?? 12 + 3 * Math.random();
-  const autoEnv = classifyEnv(brightness, texture, noise, wifi);
-  const env = envManual === "auto" ? autoEnv : envManual;
+  const brightness = 78 + 18 * Math.sin(t * 0.05);
+  const texture = 0.22 + 0.04 * Math.sin(t * 0.2);
+  const noise = 12 + 3 * rng();
 
   const imu: ImuSample = {
     ax: 0.02 * Math.sin(t * 1.7),
@@ -295,123 +289,77 @@ export function stepTwin(
     brightness,
     texture,
     noise,
-    env,
   };
 }
 
-export function sampleMapPoints(twin: TwinState, density: number, existing: number, dets: Detection[] = []): MapPoint[] {
-  if (existing > 18000) return [];
-  const out: MapPoint[] = [];
+/** Range from the observer along `heading` (rad) in the demo room. */
+export function twinSonarRange(t: number, headingRad?: number): number {
+  const obs = observerPose(t, headingRad);
+  return rayRange(obs.pos, obs.heading);
+}
+
+/** Write one frame of demo geometry into the cloud (clearly simulated data). */
+export function emitTwinPoints(cloud: PointCloud, twin: TwinState, density: number, t: number) {
   const n = Math.round(4 * density);
   for (const p of twin.people) {
     for (let i = 0; i < n; i++) {
-      const ang = Math.random() * Math.PI * 2;
-      const h = Math.random() * p.heightM;
-      const r = 0.22 * (0.5 + 0.5 * Math.sin(h * Math.PI));
-      out.push({
-        x: p.pos.x + Math.cos(ang) * r,
-        y: h,
-        z: p.pos.z + Math.sin(ang) * r,
-        kind: "person",
-        t: twin.t,
-      });
+      const ang = rng() * Math.PI * 2;
+      const h = rng() * p.heightM;
+      const r = 0.22 * (0.5 + 0.5 * Math.sin((h / p.heightM) * Math.PI));
+      cloud.add("person", p.pos.x + Math.cos(ang) * r, h, p.pos.z + Math.sin(ang) * r, t);
     }
-  }
-  for (const d of dets) {
-    if (Math.random() > 0.7) continue;
-    out.push({
-      x: d.world.x + (Math.random() - 0.5) * 0.12,
-      y: Math.max(0, d.world.y),
-      z: d.world.z + (Math.random() - 0.5) * 0.12,
-      kind: d.kind === "person" ? "person" : "object",
-      t: twin.t,
-    });
   }
   for (const obj of twin.objects) {
-    if (Math.random() > 0.45 * density) continue;
-    out.push({
-      x: obj.pos.x + (Math.random() - 0.5) * obj.size.x,
-      y: Math.random() * obj.size.y,
-      z: obj.pos.z + (Math.random() - 0.5) * obj.size.z,
-      kind: "object",
-      t: twin.t,
-    });
-  }
-  const obs = observerPose(twin.t);
-  out.push({ x: obs.pos.x, y: 0.05, z: obs.pos.z, kind: "traj", t: twin.t });
-  const hd = obs.heading;
-  const d = twin.sonarM;
-  out.push({
-    x: obs.pos.x + Math.sin(hd) * d,
-    y: 1.1,
-    z: obs.pos.z + Math.cos(hd) * d,
-    kind: "sonar",
-    t: twin.t,
-  });
-  if (Math.random() < 0.4) {
-    out.push({
-      x: WALL_X + (Math.random() - 0.5) * 0.06,
-      y: Math.random() * ROOM.h,
-      z: (Math.random() - 0.5) * ROOM.d,
-      kind: "wall",
-      t: twin.t,
-    });
-  }
-  if (Math.random() < 0.25) {
-    out.push({
-      x: obs.pos.x + (Math.random() - 0.5) * 1.4,
-      y: 0.02,
-      z: obs.pos.z - Math.random() * 2.2,
-      kind: "free",
-      t: twin.t,
-    });
-  }
-  return out;
-}
-
-export function densify(points: MapPoint[], cap = 22000): MapPoint[] {
-  const extra: MapPoint[] = [];
-  for (let i = 0; i < points.length - 1 && extra.length < 2400; i += 3) {
-    const a = points[i];
-    const b = points[i + 1];
-    if (!a || !b || a.kind !== b.kind) continue;
-    const d = dist3(a, b);
-    if (d > 0.25 && d < 1.8) {
-      extra.push({
-        x: (a.x + b.x) / 2,
-        y: (a.y + b.y) / 2,
-        z: (a.z + b.z) / 2,
-        kind: a.kind,
-        t: performance.now() / 1000,
-      });
+    const k = Math.round(2 * density);
+    for (let i = 0; i < k; i++) {
+      cloud.add(
+        "object",
+        obj.pos.x + (rng() - 0.5) * obj.size.x,
+        rng() * obj.size.y,
+        obj.pos.z + (rng() - 0.5) * obj.size.z,
+        t,
+      );
     }
   }
-  const next = points.concat(extra);
-  return next.length > cap ? next.slice(next.length - cap) : next;
+  for (let i = 0; i < 3; i++) cloud.add("wall", WALL_X + (rng() - 0.5) * 0.06, rng() * ROOM.h, (rng() - 0.5) * ROOM.d, t);
+  const obs = observerPose(t);
+  cloud.add("traj", obs.pos.x, 0.05, obs.pos.z, t);
+  cloud.add("sonar", obs.pos.x + Math.sin(obs.heading) * twin.sonarM, 1.1, obs.pos.z + Math.cos(obs.heading) * twin.sonarM, t);
+  if (rng() < 0.4) cloud.add("free", obs.pos.x + (rng() - 0.5) * 1.4, 0.02, obs.pos.z - rng() * 2.2, t);
 }
 
-export function sonarEchoTrace(distM: number): number[] {
-  const n = 96;
-  const peakAt = clamp((distM / 8) * n, 2, n - 3);
+function sonarEchoTrace(distM: number): number[] {
+  const peakAt = clamp((distM / 8) * TRACE_BINS, 2, TRACE_BINS - 3);
   const trace: number[] = [];
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < TRACE_BINS; i++) {
     const main = Math.exp(-((i - peakAt) ** 2) / 3.2);
     const multi = 0.28 * Math.exp(-((i - peakAt * 1.7) ** 2) / 8);
-    const noise = 0.04 * Math.random();
-    trace.push(clamp(main + multi + noise, 0, 1));
+    trace.push(clamp(main + multi + 0.04 * rng(), 0, 1));
   }
   return trace;
 }
 
-export function pingFromDistance(distM: number, source: SampleSource) {
+/** A simulated ping for demo mode — always labelled source "twin". */
+export function twinPing(distM: number): SonarPing {
   const dt = (2 * distM) / SOUND_MPS;
   return {
+    t: Date.now(),
     distM,
-    dtUs: dt * 1e6,
+    status: "ok",
+    message: "演示数据（场景射线）",
+    snrDb: 24,
+    confidence: 0.9,
+    directSnrDb: 40,
+    peak: 0.72 + rng() * 0.2,
     lagSamples: Math.round(dt * 48000),
-    peak: 0.72 + Math.random() * 0.2,
-    source,
+    dtUs: dt * 1e6,
+    pings: 1,
+    accepted: 1,
+    sigmaM: 0.012,
+    echoes: [{ distM, snrDb: 24 }],
+    source: "twin",
     trace: sonarEchoTrace(distM),
+    micRaw: null,
   };
 }
 
@@ -425,11 +373,6 @@ export function envWeights(env: EnvMode): FusionWeights {
     noisy: { vision: 0.25, sonar: 0.15, mag: 0.2, wifi: 0.2, depth: 0.2 },
     clutter: { vision: 0.4, sonar: 0.25, mag: 0.1, wifi: 0.1, depth: 0.15 },
   }[env];
-}
-
-export function blend(device: number | null, twin: number, preferDevice: boolean) {
-  if (device === null || !preferDevice) return twin;
-  return lerp(twin, device, 0.85);
 }
 
 export { OBJECTS };

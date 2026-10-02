@@ -13,15 +13,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const running = useRadar((s) => s.running);
   const clock = useRadar((s) => s.clock);
   const fps = useRadar((s) => s.fps);
+  const stop = useRadar((s) => s.stop);
   const env = useRadar((s) => s.env);
-  const realFlags = useRadar((s) => s.realFlags);
-  const latencyUs = useRadar((s) => s.latencyUs);
+  const sensors = useRadar((s) => s.sensors);
+  const dataMode = useRadar((s) => s.dataMode);
+  const setDataMode = useRadar((s) => s.setDataMode);
+  const enableSensors = useRadar((s) => s.enableSensors);
 
   useEffect(() => {
     start();
-  }, [start]);
+    return () => stop();
+  }, [start, stop]);
 
-  const realCount = Object.values(realFlags).filter(Boolean).length;
+  const liveCount = Object.values(sensors).filter((x) => x.state === "live").length;
+  const total = Object.keys(sensors).length;
+  const demo = dataMode === "demo";
 
   return (
     <div className="flex min-h-dvh flex-col bg-bg text-fg lg:flex-row">
@@ -57,7 +63,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <span className="live-dot" />
             <span className="uppercase tracking-widest">{running ? "Live" : "Idle"}</span>
           </div>
-          <div className="mt-2 font-mono tabular text-muted">v18.0 · 融合内核</div>
+          <div className="mt-2 font-mono tabular text-muted">v19.0 · 诚实内核</div>
         </div>
       </aside>
 
@@ -68,13 +74,37 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <span className="font-display text-sm font-semibold">AETHER</span>
           </div>
           <div className="ml-auto flex flex-wrap items-center gap-2 text-[11px]">
+            <button
+              type="button"
+              onClick={() => setDataMode(demo ? "real" : "demo")}
+              title={demo ? "当前：演示数据（缺失通道由孪生补位）。点击切换到真实模式" : "当前：只显示真实设备数据。点击切换到演示模式"}
+              className={cn(
+                "flex items-center gap-1.5 rounded-full px-2.5 py-1 font-medium",
+                demo ? "bg-warn/20 text-warn" : "bg-accent/20 text-accent",
+              )}
+            >
+              <span className={cn("size-1.5 rounded-full", demo ? "bg-warn" : "bg-accent")} />
+              {demo ? "演示数据" : "真实模式"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void enableSensors()}
+              className="rounded-full bg-raised px-2.5 py-1 text-muted hover:text-fg"
+            >
+              启用传感器
+            </button>
             <Stat label="环境" value={env.toUpperCase()} />
-            <Stat label="真实通道" value={`${realCount}/6`} accent={realCount > 0} />
-            <Stat label="FPS" value={fps.toFixed(0)} />
-            <Stat label="延迟" value={`${latencyUs.toFixed(0)} μs`} />
+            <Stat label="真实通道" value={`${liveCount}/${total}`} accent={liveCount > 0} />
+            <Stat label="帧率" value={fps.toFixed(0)} />
             <Stat label="时钟" value={clock} />
           </div>
         </header>
+
+        {demo ? (
+          <div className="border-b border-warn/25 bg-warn/10 px-4 py-1.5 text-[11px] text-warn">
+            演示模式：带 <b>DEMO</b> 标记的人物 / 物体 / Wi-Fi / 声呐为模拟数据。要看真实传感器，请点右上角切换到「真实模式」。
+          </div>
+        ) : null}
 
         <main className="relative min-h-0 flex-1 overflow-auto pb-20 lg:pb-0">{children}</main>
 

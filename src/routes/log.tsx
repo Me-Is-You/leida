@@ -18,7 +18,8 @@ function LogPage() {
   const alerts = useRadar((s) => s.alerts);
   const dismissAlert = useRadar((s) => s.dismissAlert);
   const t = useRadar((s) => s.t);
-  const realFlags = useRadar((s) => s.realFlags);
+  const sensors = useRadar((s) => s.sensors);
+  const dataMode = useRadar((s) => s.dataMode);
   const [q, setQ] = useState("");
   const [level, setLevel] = useState<LogLevel | "ALL">("ALL");
 
@@ -41,7 +42,7 @@ function LogPage() {
             <Button
               size="sm"
               variant="outline"
-              onClick={() => downloadJson(`aether-log-${Date.now()}.json`, { t, logs, alerts, realFlags })}
+              onClick={() => downloadJson(`aether-log-${Date.now()}.json`, { app: "AETHER 19", dataMode, ua: navigator.userAgent, t, sensors, logs, alerts })}
             >
               导出
             </Button>

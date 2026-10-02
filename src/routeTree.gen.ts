@@ -16,6 +16,7 @@ import { Route as LogRouteImport } from './routes/log'
 import { Route as MapRouteImport } from './routes/map'
 import { Route as SonarRouteImport } from './routes/sonar'
 import { Route as SpectrumRouteImport } from './routes/spectrum'
+import { Route as VisionRouteImport } from './routes/vision'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -52,6 +53,11 @@ const SpectrumRoute = SpectrumRouteImport.update({
   path: '/spectrum',
   getParentRoute: () => rootRouteImport,
 } as any)
+const VisionRoute = VisionRouteImport.update({
+  id: '/vision',
+  path: '/vision',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -61,6 +67,7 @@ export interface FileRoutesByFullPath {
   '/map': typeof MapRoute
   '/sonar': typeof SonarRoute
   '/spectrum': typeof SpectrumRoute
+  '/vision': typeof VisionRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -70,6 +77,7 @@ export interface FileRoutesByTo {
   '/map': typeof MapRoute
   '/sonar': typeof SonarRoute
   '/spectrum': typeof SpectrumRoute
+  '/vision': typeof VisionRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -80,6 +88,7 @@ export interface FileRoutesById {
   '/map': typeof MapRoute
   '/sonar': typeof SonarRoute
   '/spectrum': typeof SpectrumRoute
+  '/vision': typeof VisionRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -91,6 +100,7 @@ export interface FileRouteTypes {
     | '/map'
     | '/sonar'
     | '/spectrum'
+    | '/vision'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -100,6 +110,7 @@ export interface FileRouteTypes {
     | '/map'
     | '/sonar'
     | '/spectrum'
+    | '/vision'
   id:
     | '__root__'
     | '/'
@@ -109,6 +120,7 @@ export interface FileRouteTypes {
     | '/map'
     | '/sonar'
     | '/spectrum'
+    | '/vision'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -119,6 +131,7 @@ export interface RootRouteChildren {
   MapRoute: typeof MapRoute
   SonarRoute: typeof SonarRoute
   SpectrumRoute: typeof SpectrumRoute
+  VisionRoute: typeof VisionRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -172,6 +185,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SpectrumRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/vision': {
+      id: '/vision'
+      path: '/vision'
+      fullPath: '/vision'
+      preLoaderRoute: typeof VisionRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -183,6 +203,7 @@ const rootRouteChildren: RootRouteChildren = {
   MapRoute: MapRoute,
   SonarRoute: SonarRoute,
   SpectrumRoute: SpectrumRoute,
+  VisionRoute: VisionRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -18,25 +18,25 @@ function EnvPage() {
   const env = useRadar((s) => s.env);
   const envManual = useRadar((s) => s.envManual);
   const setEnv = useRadar((s) => s.setEnv);
-  const brightness = useRadar((s) => s.brightness);
-  const texture = useRadar((s) => s.texture);
-  const noise = useRadar((s) => s.noise);
-  const motion = useRadar((s) => s.motion);
+  const vision = useRadar((s) => s.vision);
   const wifi = useRadar((s) => s.wifi);
   const fusion = useRadar((s) => s.fusion);
   const brightHist = useRadar((s) => s.brightHist);
   const lightLux = useRadar((s) => s.lightLux);
-  const nightVision = useRadar((s) => s.nightVision);
-  const setNight = useRadar((s) => s.setNight);
-  const hdr = useRadar((s) => s.hdr);
-  const setHdr = useRadar((s) => s.setHdr);
+  const nightVision = useRadar((s) => s.settings.nightVision);
+  const hdr = useRadar((s) => s.settings.hdr);
+  const updateSettings = useRadar((s) => s.updateSettings);
+  const dataMode = useRadar((s) => s.dataMode);
+  const setNight = (v: boolean) => updateSettings({ nightVision: v });
+  const setHdr = (v: boolean) => updateSettings({ hdr: v });
+  const f = (v: number | null, d = 0) => (v === null ? "—" : v.toFixed(d));
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 py-5 lg:px-6">
       <PageHeader
         kicker="Environment"
         title="环境自适应"
-        hint="亮度、纹理、噪声、RSSI 方差共同分类场景，并改写五模态融合权重。"
+        hint="画面亮度 / 纹理 / 对比度、环境光传感器（若有）共同分类场景，带 8 帧滞回防抖，并改写距离融合中各来源的权重。"
         actions={
           <Button size="sm" variant={envManual === "auto" ? "accent" : "outline"} onClick={() => setEnv("auto")}>
             AUTO
@@ -46,9 +46,9 @@ function EnvPage() {
 
       <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
         <Metric label="当前" value={ENV_LABEL[env]} hint={envManual === "auto" ? "自适应" : "已锁定"} accent />
-        <Metric label="亮度" value={brightness.toFixed(0)} hint={lightLux != null ? `${lightLux.toFixed(0)} lx` : "帧均值"} />
-        <Metric label="纹理" value={texture.toFixed(2)} />
-        <Metric label="噪声" value={noise.toFixed(1)} hint={`运动 ${motion.toFixed(2)}`} />
+        <Metric label="亮度" value={f(vision.brightness)} hint={lightLux != null ? `${lightLux.toFixed(0)} lx` : vision.brightness === null ? "需要相机" : "帧均值 0–255"} />
+        <Metric label="纹理" value={f(vision.texture, 2)} hint="边缘密度" />
+        <Metric label="对比度" value={f(vision.noise, 1)} hint={`画面运动 ${f(vision.motion, 3)}`} />
       </div>
 
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
@@ -82,15 +82,15 @@ function EnvPage() {
           </CardHeader>
           <WeightBar weights={fusion} />
           <p className="mt-4 text-xs text-muted">
-            穿墙时磁场与 Wi-Fi 上升、视觉下降；室外相反。权重来自场景分类，可手动锁定。
+            权重放大/缩小各来源在距离融合里的置信度。暗光时视觉下降、声呐上升；强光/室外相反。可手动锁定模式。
           </p>
         </Card>
         <Card>
           <CardHeader>
             <CardTitle>光学状态</CardTitle>
-            <CardHint>σ {wifi.sigma.toFixed(2)}</CardHint>
+            <CardHint>{wifi.source === "none" ? "无 Wi-Fi 通道" : `σ ${wifi.sigma.toFixed(2)}（模拟）`}</CardHint>
           </CardHeader>
-          <Wave data={brightHist} />
+          <Wave data={brightHist} digits={0} xLabel="帧亮度 0–255" />
           <div className="mt-4 flex flex-wrap gap-2">
             <Button size="sm" variant={nightVision ? "accent" : "outline"} onClick={() => setNight(!nightVision)}>
               夜视 {nightVision ? "开" : "关"}
@@ -98,7 +98,7 @@ function EnvPage() {
             <Button size="sm" variant={hdr ? "accent" : "outline"} onClick={() => setHdr(!hdr)}>
               HDR {hdr ? "开" : "关"}
             </Button>
-            <Badge tone={wifi.throughWall ? "warn" : "mute"}>{wifi.throughWall ? "穿墙扰动" : "视距"}</Badge>
+            {dataMode === "demo" ? <Badge tone={wifi.throughWall ? "warn" : "mute"}>{wifi.throughWall ? "链路扰动（模拟）" : "视距（模拟）"}</Badge> : null}
           </div>
           <ul className="mt-4 space-y-1 text-xs text-muted">
             {FUSION_MODES.map((m) => (

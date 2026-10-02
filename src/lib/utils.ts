@@ -26,18 +26,24 @@ export function formatMeters(m: number | null, digits = 2) {
   return `${m.toFixed(digits)} m`;
 }
 
-export function formatUs(us: number) {
+export function formatUs(us: number | null) {
+  if (us === null || !Number.isFinite(us)) return "—";
   if (us < 1000) return `${us.toFixed(0)} μs`;
   if (us < 1_000_000) return `${(us / 1000).toFixed(1)} ms`;
   return `${(us / 1_000_000).toFixed(2)} s`;
 }
 
 export function downloadJson(filename: string, data: unknown) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
+  downloadText(filename, JSON.stringify(data, null, 2), "application/json");
+}
+
+export function downloadText(filename: string, text: string, type = "text/plain") {
+  const url = URL.createObjectURL(new Blob([text], { type }));
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
