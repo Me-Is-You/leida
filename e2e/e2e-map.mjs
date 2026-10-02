@@ -1,0 +1,26 @@
+import chromium from "@sparticuz/chromium";
+import { chromium as pw } from "playwright-core";
+import crypto from "node:crypto";
+const base = process.env.BASE || "http://localhost:8080";
+const b = await pw.launch({ executablePath: await chromium.executablePath(), headless: true,
+  args: ["--no-sandbox","--use-gl=angle","--use-angle=swiftshader","--enable-unsafe-swiftshader","--ignore-gpu-blocklist"] });
+const p = await (await b.newContext({ viewport: { width: 420, height: 900 } })).newPage();
+const errs = [];
+p.on("pageerror", (e) => errs.push("PAGEERR " + e.message.slice(0, 200)));
+p.on("console", (m) => { if (m.type() === "error" && !/ERR_CONNECTION_CLOSED/.test(m.text())) errs.push(m.text().slice(0, 200)); });
+await p.goto(base + "/map", { waitUntil: "load" });
+await p.waitForTimeout(2500);
+const cv = p.locator("canvas").first();
+const box = await cv.boundingBox();
+const hash = async (tag) => { const buf = await cv.screenshot(); const h = crypto.createHash("md5").update(buf).digest("hex").slice(0, 8); console.log(tag, h); if (tag === "after-wheel") await p.screenshot({ path: "/home/user/browser/map_i.png" }); return h; };
+const h0 = await hash("initial");
+const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
+await p.mouse.move(cx, cy); await p.mouse.down(); await p.mouse.move(cx + 120, cy + 40, { steps: 8 }); await p.mouse.up();
+await p.waitForTimeout(400);
+const h1 = await hash("after-drag");
+await p.mouse.wheel(0, -600); await p.waitForTimeout(500);
+const h2 = await hash("after-wheel");
+await p.mouse.click(cx - 20, cy + 10); await p.waitForTimeout(400);
+const h3 = await hash("after-click");
+console.log("drag changed:", h0 !== h1, "wheel changed:", h1 !== h2, "errors:", errs);
+await b.close();

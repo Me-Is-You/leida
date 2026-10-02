@@ -80,3 +80,7 @@ npm run build
 ## 未做（路线图）
 
 Termux 桥接（真实 Wi-Fi RSSI / CSI）、v16 后端、相干 SAR 成像、SLAM 回环。
+
+## v19 自研算法
+
+声呐 DSP、3D 渲染、状态仓库、校验、点云/栅格、运动检测、推理调度、OCR 预处理和二维码解码都是自研实现，详见 [docs/V19_SELF_BUILT.md](docs/V19_SELF_BUILT.md)。保留的第三方：tfjs + COCO-SSD（模型权重）和 Tesseract（字符识别）。

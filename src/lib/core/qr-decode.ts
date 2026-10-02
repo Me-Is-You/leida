@@ -38,7 +38,7 @@ export function rsCorrect(cw: Uint8Array, nsym: number): number {
   }
   if (clean) return 0;
   // Berlekamp–Massey → Λ(x) (ascending coefficients)
-  let lam = [1];
+  const lam = [1];
   let B = [1];
   let L = 0;
   let m = 1;
