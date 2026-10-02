@@ -4,7 +4,6 @@ import { Card, CardHeader, CardHint, CardTitle } from "@/components/ui/card";
 
 const LABEL: Record<string, string> = {
   "store.tick": "主循环（融合 + 状态）",
-  "twin.step": "数字孪生步进（演示）",
   "fusion.range": "测距融合",
   "sonar.record": "声呐 · 录音",
   "sonar.dsp(worker)": "声呐 · 匹配滤波（Worker）",

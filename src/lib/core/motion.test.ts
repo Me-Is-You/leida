@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { cameraPitchDeg, compassHeading } from "./compass.ts";
 import { PdrTracker, StepDetector, stepLengthFromHeight } from "./pdr.ts";
 import { MagBaseline } from "./mag.ts";
-import { angleDiffDeg, mulberry32, smoothAngleDeg, wrap360 } from "./math.ts";
+import { angleDiffDeg, smoothAngleDeg, wrap360 } from "./math.ts";
+import { mulberry32 } from "./fixtures/prng.ts";
 
 describe("compass", () => {
   it("upright phone: back camera heading follows alpha (north → 0°, west → 90°)", () => {

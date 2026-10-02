@@ -2,7 +2,7 @@
 
 手机网页应用：用相机、麦克风/喇叭、IMU、磁力计做**本地**的目标识别、主动声呐测距、航迹推算和点云建图。所有计算都在设备上完成，不上传。
 
-> 原则：**没有真实读数就显示「—」，绝不编造数字。** 演示数据只在「演示模式」出现，并始终带 DEMO 标记。
+> 原则：**没有真实读数就显示「—」，绝不编造数字。** 本站没有演示模式，也没有模拟/随机数据：在电脑上打开会看到空场景，接上手机传感器才有读数。
 
 ## 哪些是真的，哪些不是
 
@@ -15,17 +15,30 @@
 | 磁场异常 | **真实** · Magnetometer / 自适应基线 | 异常期间基线冻结 |
 | 点云 / 占用栅格 | **真实累积** | 视觉投影、声呐落点、航迹；体素去重 + 对数几率栅格 |
 | 场景分类 | **真实** · 画面亮度/纹理/环境光 | 8 帧滞回防抖 |
-| Wi-Fi RSSI、穿墙人体、呼吸率 | **仅演示（物理孪生）** | 浏览器拿不到 Wi-Fi RSSI/CSI；真实模式下显示「—」 |
-| 演示场景的墙、金属物体、AP | **仅演示** | 3D 视图里带 DEMO 标记 |
+| Wi-Fi RSSI 与「无线环境扰动」 | **真实** · 经 Termux 桥接读取 | 当前连接 + 周边 AP 各自学习基线，偏离判扰动。它说明无线环境在变，**不能**判断墙后有没有人；CSI 普通 Android 应用拿不到。未连桥接时显示「—」 |
+| 电量 | **真实** · Battery API，或桥接的 termux-battery-status | |
+| 距离融合 | **真实来源的逆方差融合** | 只融合声呐与视觉估距，没有来源时显示「—」 |
 
-模式：右上角「演示数据 / 真实模式」。演示模式 = 真实传感器优先，缺失通道由孪生补位；真实模式 = 只显示真实通道。
+**已删除（因为做不到真实）：** 演示/孪生模式、模拟穿墙人体与呼吸率、模拟场景物体、「最近金属」（无真实目标库）、合成孔径 SAR 卡片（PDR 精度远低于波长，无法相干成像）。
+
+## Termux 桥接（Wi-Fi RSSI）
+
+浏览器没有读取 Wi-Fi 信号强度的 API。`bridge/termux-bridge.mjs` 是一个零依赖的 Node 小服务，在手机的 Termux 里运行，把 `termux-api` 的读数通过 WebSocket 推给网页：
+
+```bash
+pkg install nodejs termux-api        # 另需安装 Termux:API 应用并授予定位权限（扫描 Wi-Fi 需要）
+node bridge/termux-bridge.mjs --origin https://你的站点域名
+# 打印 ws://127.0.0.1:8765/ws?token=… ，粘贴到「硬件」页的 Termux 桥接框里连接
+```
+
+安全模型：只监听 127.0.0.1；每次启动随机 128 位令牌（常数时间比较）+ 严格 Origin 白名单（默认只放行 localhost / 127.0.0.1，其它站点必须用 `--origin` 显式授权）；最多 4 个连接；单帧 ≤ 4 KB 且只接受 `ping`；只执行写死参数的三条只读命令（`termux-wifi-connectioninfo` 1 s、`termux-wifi-scaninfo` 5 s、`termux-battery-status` 30 s），不经过 shell；没有客户端连接时完全不轮询。桥接地址（含令牌）只保存在浏览器 localStorage，会话导出不包含它。`bridge/termux-bridge.test.mjs` 与 `src/lib/core/{wifi-change,bridge-protocol}.test.ts` 覆盖协议、鉴权与检测算法。
 
 ## 页面
 
 - **指挥台** 总览：融合距离（逆方差，带冲突标记）、传感器状态、告警、关键曲线。
 - **视觉** 相机、检测设置、跟踪列表（ID / 深度 ±σ / 依据 / 方位）、OCR（中英）、条码、截图。
 - **声呐** 发射、回波包络（含命中标记）、参数（温度、间距、量程、最小 SNR、平均、增益）、已知距离校准、脉冲日志。
-- **电磁与运动** 磁力计三轴 + 异常基线、IMU、蓝牙、GNSS、计步。
+- **电磁与运动** 磁力计三轴 + 异常基线、Wi-Fi 链路（经桥接）、IMU、蓝牙、GNSS、计步。
 - **3D 环境图** 点云（按类别过滤）、占用栅格、航迹；导出/导入 JSON 会话、导出 PLY。
 - **环境自适应 / 硬件 / 日志**。
 
@@ -51,6 +64,7 @@ npm run dev          # http://localhost:8080
 npm run typecheck    # tsc --noEmit
 npm test             # 含 src/lib/core 的单元测试
 node --experimental-strip-types --test src/lib/core/*.test.ts   # 仅核心算法测试
+node --test bridge/termux-bridge.test.mjs                        # 桥接测试
 npm run build
 ```
 
@@ -79,7 +93,9 @@ npm run build
 
 ## 未做（路线图）
 
-Termux 桥接（真实 Wi-Fi RSSI / CSI）、v16 后端、相干 SAR 成像、SLAM 回环。
+- Wi-Fi CSI：普通 Android 应用拿不到（需 root / 定制固件），不支持。
+- 相干 SAR 成像、SLAM 回环：需要厘米级相位相干定位，手机 IMU + PDR 做不到；已删除相关界面，不再声称。
+- v16 后端：由上面的 Termux 桥接取代（本地、只读、无持久化）。
 
 ## v19 自研算法
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { QR_VECTORS } from "./fixtures/qr-vectors.ts";
 import { decodeQrMatrix, rsCorrect, alignmentPositions } from "./qr-decode.ts";
-import { mulberry32 } from "./math.ts";
+import { mulberry32 } from "./fixtures/prng.ts";
 
 export function matrixOf(v: (typeof QR_VECTORS)[number]): Uint8Array {
   const m = new Uint8Array(v.size * v.size);

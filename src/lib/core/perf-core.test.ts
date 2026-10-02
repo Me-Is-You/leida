@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { fft, matchedEnvelope, renderChirp } from "./dsp.ts";
 import { MatchedFilter } from "./matched.ts";
-import { median, mulberry32, selectKth } from "./math.ts";
+import { median, selectKth } from "./math.ts";
+import { mulberry32 } from "./fixtures/prng.ts";
 
 function dft(re: number[], im: number[], inv = false) {
   const n = re.length;

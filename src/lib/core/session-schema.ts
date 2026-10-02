@@ -11,7 +11,8 @@ export const SessionV2 = obj({
   version: oneOf([2] as const),
   app: opt(str({ max: 40 })),
   createdAt: opt(str({ max: 40 })),
-  dataMode: oneOf(["demo", "real"] as const),
+  /** Only real measurements are ever exported. "demo" exists solely so old simulator files can be recognised and refused. */
+  dataMode: opt(oneOf(["demo", "real"] as const)),
   points: arr(pointV2, { max: 60000 }),
   trajectory: arr(trajPoint, { max: 20000, def: [] }),
   stats: opt(obj({ steps: opt(num({ int: true, min: 0 })), distanceM: opt(num()), exploredM2: opt(num()) })),
@@ -26,29 +27,17 @@ const LegacyV1 = obj({
   trajectory: opt(arr(trajPoint, { max: 20000 })),
 });
 
-export type ParseResult = { ok: true; data: SessionData; legacy: boolean } | { ok: false; error: string };
+export type ParseResult = { ok: true; data: SessionData } | { ok: false; error: string };
+
+const SIMULATED = "这个文件由旧版演示模拟器生成（不是真实测量），已拒绝导入。";
 
 export function parseSession(raw: unknown): ParseResult {
   const v2 = SessionV2.parse(raw);
-  if (v2.ok) return { ok: true, data: v2.value as SessionData, legacy: false };
-  const v1 = LegacyV1.parse(raw);
-  if (v1.ok) {
-    const valid = new Set<string>(KINDS);
-    const pts = v1.value.points
-      .filter((p) => valid.has(p.kind))
-      .map((p) => ({ kind: p.kind as (typeof KINDS)[number], x: p.x, y: p.y, z: p.z, t: p.t }));
-    return {
-      ok: true,
-      legacy: true,
-      data: {
-        format: "aether-session",
-        version: 2,
-        // v18 exports were generated from the simulator unless proven otherwise
-        dataMode: "demo",
-        points: pts,
-        trajectory: v1.value.trajectory ?? [],
-      },
-    };
+  if (v2.ok) {
+    if (v2.value.dataMode === "demo") return { ok: false, error: SIMULATED };
+    return { ok: true, data: v2.value as SessionData };
   }
+  // v18 exports ({version:"18.0", points}) were produced by the simulator unless proven otherwise
+  if (LegacyV1.parse(raw).ok) return { ok: false, error: SIMULATED };
   return { ok: false, error: v2.path.length || v2.message ? issueText(v2) : "格式无法识别" };
 }

@@ -46,12 +46,12 @@ export const CEILINGS = [
   {
     level: "hard" as const,
     title: "Wi-Fi CSI",
-    body: "Nexmon 仅 Broadcom。天玑 9500 集成 Wi-Fi 未开放 CSI，需特殊固件 + Root。本站用 RSSI 方差 σ>2.5 做穿墙有/无人。",
+    body: "Nexmon 仅 Broadcom。天玑 9500 集成 Wi-Fi 未开放 CSI，需特殊固件 + Root，普通 Android 应用拿不到。本站只通过 Termux 桥接读取 RSSI，做「无线环境相对基线的扰动」检测，不能判断墙后有没有人。",
   },
   {
     level: "soft" as const,
     title: "ToF 深度",
-    body: "机身无 ToF。深度由框面积 + 亮度反比 + 声呐融合估计，非真值深度图。",
+    body: "机身无 ToF。视觉目标的深度由「类别典型高度 + 针孔相机模型」估算（带 ±σ），声呐只在命中同一方向时参与融合，不是真值深度图。",
   },
   {
     level: "soft" as const,
@@ -91,9 +91,9 @@ export const FUSION_MODES = [
   },
   {
     id: "through",
-    label: "穿墙",
+    label: "无线扰动",
     range: "1–2 墙",
-    detect: "RSSI σ>2.5 · 磁异常",
+    detect: "RSSI σ>2.5（需 Termux 桥接）",
     weights: { vision: 0.1, sonar: 0.2, mag: 0.3, wifi: 0.3, depth: 0.1 },
   },
   {

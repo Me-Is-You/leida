@@ -35,8 +35,11 @@ import {
   type FrameMetrics,
   type StopFn,
 } from "./device";
-import { emitTwinPoints, envWeights, observerPose, resetTwin, stepTwin, twinPing, twinSonarRange } from "./engine";
-import { computeSar, trajLength } from "./fusion";
+import { startBridge, type BridgeStatus } from "./bridge";
+import { envWeights } from "./core/env-weights.ts";
+import { WifiMonitor } from "./core/wifi-change.ts";
+import type { BridgeMessage } from "./core/bridge-protocol.ts";
+import { trajLength } from "./fusion";
 import { pingSonar, stopSonar, sonarBusy, type SonarConfig } from "./sonar";
 import { record } from "./perf";
 import { kindOfClass, type RawDet } from "./vision";
@@ -45,7 +48,6 @@ import type {
   BtDevice,
   CameraFacing,
   Capability,
-  DataMode,
   Detection,
   EnvManual,
   EnvMode,
@@ -58,8 +60,6 @@ import type {
   ModelStatus,
   PersonTrack,
   Pose,
-  SarState,
-  SceneObject,
   SensorId,
   SensorStatus,
   SonarPing,
@@ -76,9 +76,25 @@ const TICK_MS = 100;
 export const cloud = new PointCloud();
 export const grid = new OccupancyGrid(0.25);
 
-export const SENSOR_IDS: SensorId[] = ["camera", "mic", "imu", "orient", "mag", "light", "geo", "bt"];
+export const SENSOR_IDS: SensorId[] = [
+  "camera",
+  "mic",
+  "imu",
+  "orient",
+  "mag",
+  "light",
+  "geo",
+  "bt",
+  "wifi",
+];
 
-const NONE_WIFI: WifiSample = { rssi: NaN, sigma: NaN, ssid: "—", throughWall: false, source: "none" };
+const NONE_WIFI: WifiSample = {
+  rssi: NaN,
+  sigma: NaN,
+  ssid: "—",
+  disturbed: false,
+  source: "none",
+};
 const NONE_MAG: MagSample = { x: 0, y: 0, z: 0, mag: NaN, anomaly: false, source: "none" };
 const NONE_IMU: ImuSample = { ax: 0, ay: 0, az: 0, gx: 0, gy: 0, gz: 0, heading: 0, source: "none" };
 const NONE_GEO: GeoSample = { lat: NaN, lng: NaN, accuracy: NaN, source: "none" };
@@ -97,7 +113,6 @@ export interface OcrResult {
 
 export interface RadarState {
   settings: Settings;
-  dataMode: DataMode;
   running: boolean;
   t: number;
   fps: number;
@@ -110,15 +125,22 @@ export interface RadarState {
   lightLux: number | null;
   pose: Pose;
   people: PersonTrack[];
-  objects: SceneObject[];
   detections: Detection[];
   wifi: WifiSample;
+  /** Termux bridge: connection state, what it can read, and its battery reading. */
+  bridge: {
+    status: BridgeStatus;
+    note: string;
+    caps: { wifiLink: boolean; wifiScan: boolean; battery: boolean } | null;
+    battery: { level: number; charging: boolean } | null;
+    apsTracked: number;
+    apDisturbedShare: number | null;
+  };
   mag: MagSample;
   magBaseline: number | null;
   imu: ImuSample;
   geo: GeoSample;
   sonar: SonarPing | null;
-  sonarTwin: SonarPing | null;
   sonarBusy: boolean;
   fused: FusedRange;
   bt: BtDevice[];
@@ -159,11 +181,11 @@ export interface RadarState {
   fusion: FusionWeights;
   trajLen: number;
   steps: number;
-  sar: SarState;
   // actions
   start: () => void;
   stop: () => void;
-  setDataMode: (m: DataMode) => void;
+  connectBridge: (url: string) => void;
+  disconnectBridge: () => void;
   updateSettings: (patch: Partial<Settings>) => void;
   setEnv: (m: EnvManual) => void;
   enableSensors: () => Promise<void>;
@@ -203,7 +225,10 @@ let houseTimer = 0;
 let bootT = 0;
 let lastFrameAt = 0;
 let lastPingAt = 0;
-let lastTwinSonarAt = 0;
+let wifiLinkAt = 0;
+let wifiSsid = "—";
+const wifiMon = new WifiMonitor();
+let stopBridgeFn: (() => void) | null = null;
 let lastTrajAt = { x: NaN, z: NaN };
 let visibilityHooked = false;
 
@@ -255,6 +280,52 @@ function hit(id: SensorId) {
   }
 }
 
+function closeBridge() {
+  stopBridgeFn?.();
+  stopBridgeFn = null;
+  wifiLinkAt = 0;
+}
+
+let bridgeSink: {
+  set: (p: Partial<RadarState> | ((s: RadarState) => Partial<RadarState>)) => void;
+  log: (m: string, l?: LogEntry["level"]) => void;
+} | null = null;
+
+function onBridgeMessage(m: BridgeMessage) {
+  const sink = bridgeSink;
+  if (!sink) return;
+  switch (m.type) {
+    case "hello":
+      sink.set((st) => ({ bridge: { ...st.bridge, caps: m.caps } }));
+      sink.log("Termux 桥接已连接", "REAL");
+      break;
+    case "wifi-link":
+      wifiMon.pushLink(m.bssid, m.rssi, Date.now());
+      wifiLinkAt = performance.now();
+      wifiSsid = m.ssid || "（隐藏）";
+      hit("wifi");
+      break;
+    case "wifi-scan": {
+      wifiMon.pushScan(m.aps, Date.now());
+      const w = wifiMon.state();
+      sink.set((st) => ({
+        bridge: { ...st.bridge, apsTracked: w.apsTracked, apDisturbedShare: w.apDisturbedShare },
+      }));
+      break;
+    }
+    case "battery":
+      sink.set((st) => ({
+        bridge: { ...st.bridge, battery: { level: m.level / 100, charging: m.charging } },
+      }));
+      break;
+    case "error":
+      sink.log(`桥接 ${m.source}：${m.message}`, "WARN");
+      break;
+    default:
+      break;
+  }
+}
+
 function pushHist(arr: number[], v: number) {
   arr.push(v);
   if (arr.length > HISTORY) arr.shift();
@@ -285,33 +356,23 @@ function sonarConfig(s: Settings): SonarConfig {
   };
 }
 
-/** The sonar reading the UI should show: a fresh real ping, else (demo only) the simulated one. */
-export function effectiveSonar(st: Pick<RadarState, "sonar" | "sonarTwin" | "dataMode">): SonarPing | null {
-  if (st.sonar && Date.now() - st.sonar.t < SONAR_FRESH_MS) return st.sonar;
-  if (st.dataMode === "demo") return st.sonarTwin;
-  return null;
+/** The sonar reading the UI should show: a fresh real ping, otherwise nothing. */
+export function effectiveSonar(st: Pick<RadarState, "sonar">): SonarPing | null {
+  return st.sonar && Date.now() - st.sonar.t < SONAR_FRESH_MS ? st.sonar : null;
 }
 
-const NO_OBJECTS: SceneObject[] = [];
-const EMPTY_FUSED: FusedRange = { rangeM: null, sigmaM: null, used: [], rejected: [], conflict: false };
+const EMPTY_FUSED: FusedRange = {
+  rangeM: null,
+  sigmaM: null,
+  used: [],
+  rejected: [],
+  conflict: false,
+};
 
 const initialPose: Pose = { x: 0, z: 0, headingDeg: 0, pitchDeg: 0, heightM: initial.cameraHeightM, steps: 0, source: "none" };
 
 export const useRadar = createStore<RadarState>((set, get) => {
-  function computePose(t: number, s: Settings, mode: DataMode): Pose {
-    if (mode === "demo") {
-      const hRad = devHeading != null ? (devHeading * Math.PI) / 180 : undefined;
-      const obs = observerPose(t, hRad);
-      return {
-        x: obs.pos.x,
-        z: obs.pos.z,
-        headingDeg: (obs.heading * 180) / Math.PI,
-        pitchDeg: devPitch,
-        heightM: obs.pos.y,
-        steps: 0,
-        source: "twin",
-      };
-    }
+  function computePose(s: Settings): Pose {
     return {
       x: pdr.state.x,
       z: pdr.state.z,
@@ -344,24 +405,23 @@ export const useRadar = createStore<RadarState>((set, get) => {
     const t = (t0 - bootT) / 1000;
     const st = get();
     const s = st.settings;
-    const mode = st.dataMode;
-    const demo = mode === "demo";
-
-    // ── twin (demo only) ──
-    const hRad = devHeading != null ? (devHeading * Math.PI) / 180 : undefined;
-    const tTwin = performance.now();
-    const twin = demo ? stepTwin(t, hRad) : null;
-    if (demo) record("twin.step", performance.now() - tTwin);
 
     // ── sensors → channels ──
-    const mag: MagSample = devMag ?? twin?.mag ?? NONE_MAG;
-    const imu: ImuSample = devImu
-      ? { ...devImu, heading: devHeading ?? 0 }
-      : twin
-        ? twin.imu
-        : NONE_IMU;
-    const geo: GeoSample = devGeo ?? twin?.geo ?? NONE_GEO;
-    const wifi: WifiSample = twin?.wifi ?? NONE_WIFI;
+    const mag: MagSample = devMag ?? NONE_MAG;
+    const imu: ImuSample = devImu ? { ...devImu, heading: devHeading ?? 0 } : NONE_IMU;
+    const geo: GeoSample = devGeo ?? NONE_GEO;
+    // Wi-Fi comes only from the Termux bridge (browsers cannot read RSSI); stale after 5 s without a link reading
+    const wm = wifiMon.state();
+    const wifiFresh = wifiLinkAt > 0 && t0 - wifiLinkAt < 5000 && Number.isFinite(wm.rssi);
+    const wifi: WifiSample = wifiFresh
+      ? {
+          rssi: wm.rssi,
+          sigma: wm.sigma,
+          ssid: wifiSsid,
+          disturbed: wm.baselineReady && wm.disturbed,
+          source: "device",
+        }
+      : NONE_WIFI;
 
     let magOut = mag;
     let magBaseline: number | null = null;
@@ -372,32 +432,22 @@ export const useRadar = createStore<RadarState>((set, get) => {
     }
 
     // ── pose ──
-    const pose = computePose(t, s, mode);
+    const pose = computePose(s);
     let trajectory = st.trajectory;
     const moved = Math.hypot(pose.x - lastTrajAt.x, pose.z - lastTrajAt.z);
     if (!Number.isFinite(moved) || moved >= 0.15) {
       lastTrajAt = { x: pose.x, z: pose.z };
       trajectory = trajectory.concat([{ x: pose.x, y: 0.04, z: pose.z }]);
       if (trajectory.length > 3000) trajectory = trajectory.slice(trajectory.length - 3000);
-      if (st.mapping && (pose.source !== "none" || demo)) cloud.add("traj", pose.x, 0.05, pose.z, t);
+      if (st.mapping && pose.source !== "none") cloud.add("traj", pose.x, 0.05, pose.z, t);
     }
-
-    // ── twin geometry into the cloud ──
-    if (twin && st.mapping) emitTwinPoints(cloud, twin, s.mapDensity, t);
-
-    // ── demo sonar (1 Hz, clearly labelled twin) ──
-    let sonarTwin = st.sonarTwin;
-    if (demo && t0 - lastTwinSonarAt > 1000) {
-      lastTwinSonarAt = t0;
-      sonarTwin = twinPing(twinSonarRange(t, hRad));
-    } else if (!demo) sonarTwin = null;
 
     // ── vision freshness ──
     const visionFresh = visionMetrics !== null && t0 - visionMetricsAt < 2500;
     const vm = visionFresh ? visionMetrics : null;
-    const bright = vm ? vm.brightness : twin ? twin.brightness : null;
-    const texture = vm ? vm.texture : twin ? twin.texture : null;
-    const noise = vm ? vm.noise : twin ? twin.noise : null;
+    const bright = vm ? vm.brightness : null;
+    const texture = vm ? vm.texture : null;
+    const noise = vm ? vm.noise : null;
 
     // ── environment ──
     const metrics: EnvMetrics = {
@@ -405,18 +455,18 @@ export const useRadar = createStore<RadarState>((set, get) => {
       texture,
       noise,
       lux: devLux,
-      rssiSigma: twin ? twin.wifi.sigma : null,
+      rssiSigma: wifiFresh && wm.baselineReady && Number.isFinite(wm.sigma) ? wm.sigma : null,
     };
     const autoEnv = envCls.update(metrics);
     const env = st.envManual === "auto" ? autoEnv : st.envManual;
     const fusion = envWeights(env);
 
     // ── people / detections ──
-    const people = twin ? [...twin.people, ...visionPeople] : visionPeople;
+    const people = visionPeople;
     const detections = s.personOnly ? visionDets.filter((d) => d.cls === "person") : visionDets;
 
     // ── range fusion (real sources only; the weights are the active mode's) ──
-    const sonarNow = effectiveSonar({ sonar: st.sonar, sonarTwin, dataMode: mode });
+    const sonarNow = effectiveSonar({ sonar: st.sonar });
     const centre = visionDets
       .filter((d) => !d.truncated && Math.abs(bearingOf(d.bbox[0] + d.bbox[2] / 2, camModel(s, 4 / 3))) < 12)
       .sort((a, b) => a.depthM - b.depthM)[0];
@@ -438,7 +488,7 @@ export const useRadar = createStore<RadarState>((set, get) => {
 
     // ── alerts ──
     const fresh = alertEng.update(t0, {
-      throughWall: twin?.wifi.throughWall ?? false,
+      linkDisturbed: wifi.disturbed,
       magAnomaly: magOut.anomaly,
       magDeltaUt: magBaseline !== null ? mag.mag - magBaseline : undefined,
       sonarM: sonarNow?.distM ?? null,
@@ -477,7 +527,6 @@ export const useRadar = createStore<RadarState>((set, get) => {
 
     // ── derived map stats (cheap) ──
     const L = trajLength(trajectory);
-    const sar = computeSar(L, fused.rangeM ?? sonarNow?.distM ?? 2, s.sonarTempC);
     const cv = cloud.version;
     const gv = grid.version;
 
@@ -491,7 +540,6 @@ export const useRadar = createStore<RadarState>((set, get) => {
       t,
       pose,
       people,
-      objects: twin ? twin.objects : NO_OBJECTS,
       detections,
       wifi,
       mag: magOut,
@@ -501,13 +549,11 @@ export const useRadar = createStore<RadarState>((set, get) => {
       env,
       vision: { brightness: bright, texture, noise, motion: vm ? vm.motion : null },
       lightLux: devLux,
-      sonarTwin,
       fused,
       sonarBusy: sonarBusy(),
       trajectory,
       trajLen: L,
       steps: pdr.state.steps,
-      sar,
       fusion,
       fps,
       latencyUs: (() => {
@@ -546,7 +592,7 @@ export const useRadar = createStore<RadarState>((set, get) => {
         sensorsDirty = true;
       }
       const t0 = startedAt[id];
-      if (s.state === "pending" && t0 && now - t0 > 4000 && id !== "geo") {
+      if (s.state === "pending" && t0 && now - t0 > 4000 && id !== "geo" && id !== "wifi") {
         s.state = "error";
         s.note = "启动后没有收到任何读数（设备无此传感器 / 桌面浏览器）";
         sensorsDirty = true;
@@ -640,9 +686,10 @@ export const useRadar = createStore<RadarState>((set, get) => {
     }
   };
 
+  bridgeSink = { set, log: (msg, level) => get().pushLog(msg, level) };
+
   return {
     settings: initial,
-    dataMode: initial.dataMode,
     running: false,
     t: 0,
     fps: 0,
@@ -655,15 +702,21 @@ export const useRadar = createStore<RadarState>((set, get) => {
     lightLux: null,
     pose: initialPose,
     people: [],
-    objects: [],
     detections: [],
     wifi: NONE_WIFI,
+    bridge: {
+      status: "off",
+      note: "",
+      caps: null,
+      battery: null,
+      apsTracked: 0,
+      apDisturbedShare: null,
+    },
     mag: NONE_MAG,
     magBaseline: null,
     imu: NONE_IMU,
     geo: NONE_GEO,
     sonar: null,
-    sonarTwin: null,
     sonarBusy: false,
     fused: EMPTY_FUSED,
     bt: [],
@@ -704,7 +757,6 @@ export const useRadar = createStore<RadarState>((set, get) => {
     fusion: envWeights("indoor"),
     trajLen: 0,
     steps: 0,
-    sar: { L: 0.05, R: 2, delta: 0.17, lambda: 0.017 },
 
     // ───────────────────────── lifecycle ─────────────────────────
     start: () => {
@@ -716,13 +768,11 @@ export const useRadar = createStore<RadarState>((set, get) => {
         capabilities: probeCapabilities(),
         hidden: document.hidden,
       });
-      get().pushLog(
-        get().dataMode === "demo"
-          ? "站点上线 · 演示模式：缺失通道由物理孪生补位并标注 TWIN"
-          : "站点上线 · 真实模式：只显示真实设备数据，没有数据的通道显示 —",
-        "INFO",
-      );
-      const needGesture = typeof (globalThis as { DeviceMotionEvent?: { requestPermission?: unknown } }).DeviceMotionEvent?.requestPermission === "function";
+      get().pushLog("站点上线 · 只显示真实设备数据，没有读数的通道显示 —", "INFO");
+      if (get().settings.bridgeUrl) get().connectBridge(get().settings.bridgeUrl);
+      const needGesture =
+        typeof (globalThis as { DeviceMotionEvent?: { requestPermission?: unknown } })
+          .DeviceMotionEvent?.requestPermission === "function";
       set({ needsMotionGesture: needGesture });
       if (!needGesture) startMotion();
       startEnvSensors();
@@ -753,51 +803,48 @@ export const useRadar = createStore<RadarState>((set, get) => {
       devGeo = null;
       devHeading = null;
       devLux = null;
+      closeBridge();
       stopCamera();
       stopSonar();
       set({ running: false, cameraOn: false, autoPing: false });
       housekeeping();
     },
 
-    setDataMode: (m) => {
-      if (get().dataMode === m) return;
-      cloud.clear();
-      grid.clear();
-      tracker.reset();
-      visionDets = [];
-      visionPeople = [];
-      lastTrajAt = { x: NaN, z: NaN };
-      pdr.reset();
-      stepDet.reset();
-      magBase.reset();
-      resetTwin();
-      const settings = { ...get().settings, dataMode: m };
+    connectBridge: (url) => {
+      closeBridge();
+      const settings = parseSettings({ ...get().settings, bridgeUrl: url.trim() });
       saveSettings(storage(), settings);
-      set({
-        dataMode: m,
-        settings,
-        trajectory: [],
-        sonar: null,
-        sonarTwin: null,
-        fused: EMPTY_FUSED,
-        cloudVersion: cloud.version,
-        cloudCounts: cloud.counts(),
-        gridVersion: grid.version,
-        exploredM2: 0,
-        rssiHist: [],
-        magHist: [],
-        magXHist: [],
-        magYHist: [],
-        magZHist: [],
-        sonarHist: [],
-        pingHistory: [],
-        alerts: [],
-        detections: [],
-        people: [],
-        steps: 0,
+      set({ settings });
+      if (!settings.bridgeUrl) return;
+      wifiMon.reset();
+      wifiLinkAt = 0;
+      setSensor("wifi", { state: "pending", note: "" });
+      startedAt.wifi = performance.now();
+      stopBridgeFn = startBridge(settings.bridgeUrl, {
+        onStatus: (status, note) => {
+          set((st) => ({
+            bridge: {
+              ...st.bridge,
+              status,
+              note,
+              ...(status === "live" ? {} : { caps: status === "off" ? null : st.bridge.caps }),
+            },
+          }));
+          if (status === "error") setSensor("wifi", { state: "error", note });
+          else if (status === "off") setSensor("wifi", { state: "off", note: "" });
+          else if (status === "connecting") setSensor("wifi", { state: "pending", note });
+        },
+        onMessage: onBridgeMessage,
       });
-      alertEng.reset();
-      get().pushLog(m === "demo" ? "切换到演示模式 · 孪生数据会补位" : "切换到真实模式 · 仅显示真实设备数据", m === "demo" ? "INFO" : "REAL");
+      get().pushLog("正在连接 Termux 桥接", "INFO");
+    },
+
+    disconnectBridge: () => {
+      closeBridge();
+      const settings = parseSettings({ ...get().settings, bridgeUrl: "" });
+      saveSettings(storage(), settings);
+      set({ settings });
+      get().pushLog("已断开 Termux 桥接并清除保存的地址", "INFO");
     },
 
     updateSettings: (patch) => {
@@ -832,7 +879,7 @@ export const useRadar = createStore<RadarState>((set, get) => {
       const next = !get().mapping;
       set({ mapping: next });
       get().pushLog(next ? "开始建图" : "建图暂停");
-      if (next && get().dataMode === "real" && get().sensors.orient.state !== "live") {
+      if (next && get().sensors.orient.state !== "live") {
         toast.warning("没有罗盘读数：点云只能以 0° 朝向累积，请先启用传感器");
       }
     },
@@ -1064,10 +1111,8 @@ export const useRadar = createStore<RadarState>((set, get) => {
           name: `目标 #${d.trackId}`,
           pos: { x: d.world.x, y: 0, z: d.world.z },
           heading: 0,
-          bpm: null,
           confidence: d.score,
           source: "device" as const,
-          behindWall: false,
           heightM: CLASS_HEIGHT_M.person ?? 1.7,
           cls: "person",
         }));
@@ -1117,7 +1162,7 @@ export const useRadar = createStore<RadarState>((set, get) => {
       version: 2,
       app: "AETHER 19",
       createdAt: new Date().toISOString(),
-      dataMode: get().dataMode,
+      dataMode: "real",
       points: cloud.toJSON(),
       trajectory: get().trajectory.map((p) => ({ x: p.x, y: p.y, z: p.z })),
       stats: {
@@ -1144,8 +1189,7 @@ export const useRadar = createStore<RadarState>((set, get) => {
         gridVersion: grid.version,
         exploredM2: 0,
       });
-      const note = r.legacy ? "（v18 旧格式，视作演示数据）" : r.data.dataMode === "demo" ? "（演示数据）" : "";
-      get().pushLog(`导入 ${r.data.points.length} 点 ${note}`);
+      get().pushLog(`导入 ${r.data.points.length} 点`);
       return true;
     },
 

@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { PageHeader } from "@/components/panels/page-header";
 import { PerfTable } from "@/components/panels/perf-table";
+import { BridgePanel } from "@/components/panels/bridge-panel";
 import { Metric } from "@/components/panels/metric";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,6 +22,7 @@ const SENSOR_LABEL: Record<string, string> = {
   light: "环境光",
   geo: "定位 GNSS",
   bt: "蓝牙",
+  wifi: "Wi-Fi（Termux 桥接）",
 };
 const STATE_LABEL: Record<string, string> = {
   off: "未启用",
@@ -38,7 +40,9 @@ function HardwarePage() {
   const fps = useRadar((s) => s.fps);
   const latencyUs = useRadar((s) => s.latencyUs);
   const [runtime, setRuntime] = useState<ReturnType<typeof hostRuntime> | null>(null);
-  const [battery, setBattery] = useState<{ level: number; charging: boolean } | null>(null);
+  const [webBattery, setBattery] = useState<{ level: number; charging: boolean } | null>(null);
+  const bridgeBattery = useRadar((s) => s.bridge.battery);
+  const battery = webBattery ?? bridgeBattery;
 
   useEffect(() => {
     setRuntime(hostRuntime());
@@ -69,9 +73,15 @@ function HardwarePage() {
         <Metric
           label="电量"
           value={battery ? `${Math.round(battery.level * 100)}%` : "—"}
-          hint={battery ? (battery.charging ? "充电中" : "放电") : "Battery API"}
+          hint={
+            battery
+              ? `${battery.charging ? "充电中" : "放电"} · ${webBattery ? "Battery API" : "Termux"}`
+              : "Battery API 不可用"
+          }
         />
       </div>
+
+      <BridgePanel />
 
       <Card>
         <CardHeader>

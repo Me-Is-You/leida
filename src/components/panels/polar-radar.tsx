@@ -3,7 +3,6 @@ import { effectiveSonar, useRadar } from "@/lib/radar-store";
 /** Heading-up plan view centred on the observer: up = where the camera points. */
 export function PolarRadar({ size = 220, range = 6 }: { size?: number; range?: number }) {
   const people = useRadar((s) => s.people);
-  const objects = useRadar((s) => s.objects);
   const detections = useRadar((s) => s.detections);
   const pose = useRadar((s) => s.pose);
   const sonar = useRadar(effectiveSonar);
@@ -36,11 +35,11 @@ export function PolarRadar({ size = 220, range = 6 }: { size?: number; range?: n
       <text x={c} y={11} textAnchor="middle" fontSize="9" className="fill-muted">
         前
       </text>
-      <polygon points={`${c},${c - R} ${c + 0.42 * R},${c} ${c - 0.42 * R},${c}`} fill="var(--color-accent)" opacity="0.1" />
-      {objects.map((o) => {
-        const p = to(o.pos.x, o.pos.z);
-        return inside(p) ? <circle key={o.id} cx={p.px} cy={p.py} r={o.metal ? 3.2 : 2.2} fill="var(--color-muted)" opacity="0.7" /> : null;
-      })}
+      <polygon
+        points={`${c},${c - R} ${c + 0.42 * R},${c} ${c - 0.42 * R},${c}`}
+        fill="var(--color-accent)"
+        opacity="0.1"
+      />
       {detections
         .filter((d) => d.cls !== "person")
         .map((d) => {
@@ -50,14 +49,7 @@ export function PolarRadar({ size = 220, range = 6 }: { size?: number; range?: n
       {people.map((p) => {
         const pt = to(p.pos.x, p.pos.z);
         return inside(pt) ? (
-          <circle
-            key={p.id}
-            cx={pt.px}
-            cy={pt.py}
-            r={p.source === "device" ? 4.2 : 3.4}
-            fill={p.behindWall ? "var(--color-warn)" : "var(--color-accent)"}
-            opacity={p.source === "device" ? 1 : 0.7}
-          />
+          <circle key={p.id} cx={pt.px} cy={pt.py} r={4.2} fill="var(--color-accent)" opacity={1} />
         ) : null;
       })}
       {sonar?.distM != null && sonar.distM <= range ? (

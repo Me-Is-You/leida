@@ -1,10 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { CLOUD_KINDS, type CloudKind } from "@/lib/core/cloud.ts";
-import { mulberry32 } from "@/lib/core/math.ts";
-import { rayAabb } from "@/lib/gl/mat4.ts";
 import { OrbitCamera } from "@/lib/gl/orbit.ts";
 import { Batch, BoxBatch, GLRenderer, type PointLayer, type RGBA, hex } from "@/lib/gl/renderer.ts";
-import { AP, ROOM, WALL_X } from "@/lib/engine";
 import { record } from "@/lib/perf";
 import { cloud, effectiveSonar, grid, useRadar } from "@/lib/radar-store";
 import type { ViewPreset } from "@/lib/types";
@@ -84,20 +81,18 @@ function runScene(r: GLRenderer, canvas: HTMLCanvasElement, box: HTMLElement): (
   const ringsB = new Batch();
   for (const rr of [1, 2, 3, 5]) ringsB.ring(0, 0.02, 0, rr, hex("#8fb4b8", rr === 5 ? 0.3 : 0.18));
 
-  const wallsB = new BoxBatch(8);
-  const objsB = new BoxBatch(64);
   const occB = new BoxBatch(3000);
   const dyn = new Batch();
   const trajB = new Batch();
 
-  // person silhouette: 140 points on a lathe + head, reused for every tracked person
-  const rnd = mulberry32(42);
+  // person marker glyph (a fixed icon, not data): 140 points on a lathe + head, spread with low-discrepancy sequences
+  const frac = (x: number) => x - Math.floor(x);
   const personPts = new Float32Array(180 * 3);
   for (let i = 0; i < 180; i++) {
-    const h = rnd();
-    const t = rnd() * TAU;
+    const h = frac((i + 0.5) * 0.6180339887);
+    const t = frac(i * 0.7548776662) * TAU;
     if (i >= 140) {
-      const p = rnd() * Math.PI;
+      const p = frac((i - 140 + 0.5) / 40 + 0.31) * Math.PI;
       personPts[i * 3] = Math.sin(p) * Math.cos(t) * 0.18;
       personPts[i * 3 + 1] = 1.52 + Math.cos(p) * 0.18;
       personPts[i * 3 + 2] = Math.sin(p) * Math.sin(t) * 0.18;
@@ -119,15 +114,13 @@ function runScene(r: GLRenderer, canvas: HTMLCanvasElement, box: HTMLElement): (
 
   r.onRestore = () => {
     for (const b of [gridB, ringsB, dyn, trajB]) r.forget(b);
-    for (const b of [wallsB, objsB, occB]) r.forget(b);
+    for (const b of [occB]) r.forget(b);
     for (const l of [person, marker, ...Object.values(layers)]) r.forget(l);
-    sceneKey = "";
     occV = -1;
     trajN = -1;
   };
 
   // ─ scene state tracked for rebuilds ──────────────────────────────
-  let sceneKey = "";
   let occV = -1;
   let occOn = false;
   let trajN = -1;
@@ -141,36 +134,14 @@ function runScene(r: GLRenderer, canvas: HTMLCanvasElement, box: HTMLElement): (
   let visible = true;
   let alive = true;
   let raf = 0;
-  const t0 = performance.now();
-
-  const rebuildScene = (demo: boolean, selected: string | null, objects: ReturnType<typeof useRadar.getState>["objects"]) => {
-    wallsB.clear();
-    objsB.clear();
-    if (demo) {
-      wallsB.add(WALL_X, ROOM.h / 2, 0, 0.08, ROOM.h, ROOM.d, hex("#2a3038", 0.3));
-      for (const x of [-ROOM.w / 2, ROOM.w / 2]) wallsB.add(x, ROOM.h / 2, 0, 0.06, ROOM.h, ROOM.d, hex("#1a1e24", 0.24));
-      for (const o of objects) {
-        const sel = selected === o.id;
-        const c = sel ? hex("#ece8e0", 0.72) : o.metal ? hex("#9aa3a8", 0.5) : hex("#3a3f46", 0.5);
-        objsB.add(o.pos.x, o.size.y / 2, o.pos.z, o.size.x, o.size.y, o.size.z, c);
-      }
-      objsB.add(AP.x, AP.y, AP.z, 0.22, 0.06, 0.16, hex("#7dba9a", 0.95));
-    }
-  };
 
   // ─ gestures ──────────────────────────────────────────────────────
   const ptrs = new Map<number, { x: number; y: number }>();
-  let downAt = 0;
-  let moved = 0;
   let lastPinch = 0;
   const rect = () => canvas.getBoundingClientRect();
   const onDown = (e: PointerEvent) => {
     canvas.setPointerCapture(e.pointerId);
     ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    if (ptrs.size === 1) {
-      downAt = performance.now();
-      moved = 0;
-    }
     if (ptrs.size === 2) {
       const [a, b] = [...ptrs.values()] as [{ x: number; y: number }, { x: number; y: number }];
       lastPinch = Math.hypot(a.x - b.x, a.y - b.y);
@@ -181,7 +152,6 @@ function runScene(r: GLRenderer, canvas: HTMLCanvasElement, box: HTMLElement): (
     if (!p) return;
     const dx = e.clientX - p.x;
     const dy = e.clientY - p.y;
-    moved += Math.abs(dx) + Math.abs(dy);
     if (ptrs.size === 1) {
       const dYaw = -dx * 0.006;
       cam.rotate(dYaw, dy * 0.005);
@@ -203,29 +173,10 @@ function runScene(r: GLRenderer, canvas: HTMLCanvasElement, box: HTMLElement): (
   const onUp = (e: PointerEvent) => {
     ptrs.delete(e.pointerId);
     lastPinch = 0;
-    if (ptrs.size === 0 && moved < 6 && performance.now() - downAt < 350) pick(e.clientX, e.clientY);
   };
   const onWheel = (e: WheelEvent) => {
     e.preventDefault();
     cam.zoom(Math.exp(e.deltaY * 0.0012));
-  };
-  const pick = (cx: number, cy: number) => {
-    const b = rect();
-    const ray = cam.pickRay(((cx - b.left) / b.width) * 2 - 1, -(((cy - b.top) / b.height) * 2 - 1), b.width / b.height);
-    if (!ray) return;
-    const st = useRadar.getState();
-    if (st.dataMode !== "demo") return;
-    let best: { id: string; t: number } | null = null;
-    for (const o of st.objects) {
-      const t = rayAabb(
-        ...ray.o,
-        ...ray.d,
-        [o.pos.x - o.size.x / 2, 0, o.pos.z - o.size.z / 2],
-        [o.pos.x + o.size.x / 2, o.size.y, o.pos.z + o.size.z / 2],
-      );
-      if (t !== null && (!best || t < best.t)) best = { id: o.id, t };
-    }
-    st.select(best ? (st.selectedId === best.id ? null : best.id) : null);
   };
   canvas.addEventListener("pointerdown", onDown);
   canvas.addEventListener("pointermove", onMove);
@@ -248,12 +199,11 @@ function runScene(r: GLRenderer, canvas: HTMLCanvasElement, box: HTMLElement): (
     lastFrame = now;
 
     const st = useRadar.getState();
-    const demo = st.dataMode === "demo";
     const pose = st.pose;
     const want = st.settings.viewPreset;
 
     // camera presets & target following
-    const followPose = !demo || want === "follow";
+    const followPose = true;
     if (want !== preset) {
       preset = want;
       followYawOffset = 0;
@@ -270,8 +220,9 @@ function runScene(r: GLRenderer, canvas: HTMLCanvasElement, box: HTMLElement): (
 
     // cheap change detection → skip the draw when nothing visible changed
     const sonar = effectiveSonar(st);
-    const sig = `${cloud.version}|${grid.version}|${pose.x.toFixed(2)}|${pose.z.toFixed(2)}|${pose.headingDeg.toFixed(0)}|${sonar?.distM ?? "-"}|${st.selectedId}|${st.meshOn}|${st.trajectory.length}|${st.people.length}|${demo}|${JSON.stringify(st.settings.kindFilter)}`;
-    if (!camMoving && !demo && sig === lastSig && now - lastDraw < 1000 && lastDraw !== 0 && ptrs.size === 0) return;
+    const sig = `${cloud.version}|${grid.version}|${pose.x.toFixed(2)}|${pose.z.toFixed(2)}|${pose.headingDeg.toFixed(0)}|${sonar?.distM ?? "-"}|${st.meshOn}|${st.trajectory.length}|${st.people.length}|${JSON.stringify(st.settings.kindFilter)}`;
+    if (!camMoving && sig === lastSig && now - lastDraw < 1000 && lastDraw !== 0 && ptrs.size === 0)
+      return;
     lastSig = sig;
     lastDraw = now;
     const tStart = performance.now();
@@ -280,21 +231,11 @@ function runScene(r: GLRenderer, canvas: HTMLCanvasElement, box: HTMLElement): (
     const b = box.getBoundingClientRect();
     r.resize(b.width, b.height, dprCap, cam.fov);
 
-    const key = `${demo}|${st.selectedId}|${st.objects.length}`;
-    if (key !== sceneKey) {
-      sceneKey = key;
-      rebuildScene(demo, st.selectedId, st.objects);
-    }
-
     const kf = st.settings.kindFilter;
     r.begin(cam.viewProj(Math.max(0.1, b.width / Math.max(1, b.height))), BG);
     // grid snaps to whole metres around the target so it feels infinite
     r.drawBatch(gridB, Math.round(cam.tx), 0, Math.round(cam.tz));
     r.drawBatch(ringsB, pose.x, 0, pose.z);
-    if (demo) {
-      r.drawBoxes(wallsB);
-      r.drawBoxes(objsB);
-    }
 
     // occupancy cells
     if (st.meshOn) {
@@ -323,14 +264,12 @@ function runScene(r: GLRenderer, canvas: HTMLCanvasElement, box: HTMLElement): (
     }
 
     // tracked people silhouettes
-    const tSec = (now - t0) / 1000;
     for (let i = 0; i < Math.min(8, st.people.length); i++) {
       const p = st.people[i];
       if (!p) continue;
-      const br = p.bpm ? 1 + 0.028 * Math.sin(tSec * (p.bpm / 60) * TAU) : 1;
       person.offset = [p.pos.x, p.pos.y, p.pos.z];
-      person.scale = [br, 1, br];
-      person.color = p.source === "device" ? hex("#7dba9a", 0.95) : p.behindWall ? hex("#c4a574", 0.32) : hex("#8fb4b8", 0.7);
+      person.scale = [1, 1, 1];
+      person.color = hex("#7dba9a", 0.95);
       r.drawPoints(person);
     }
 

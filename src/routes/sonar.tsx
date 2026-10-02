@@ -28,14 +28,10 @@ function SonarPage() {
   const busy = useRadar((s) => s.sonarBusy);
   const sonar = useRadar(effectiveSonar);
   const lastReal = useRadar((s) => s.sonar);
-  const dataMode = useRadar((s) => s.dataMode);
   const autoPing = useRadar((s) => s.autoPing);
   const setAutoPing = useRadar((s) => s.setAutoPing);
   const history = useRadar((s) => s.pingHistory);
   const sonarHist = useRadar((s) => s.sonarHist);
-  const sar = useRadar((s) => s.sar);
-  const trajLen = useRadar((s) => s.trajLen);
-  const mapping = useRadar((s) => s.mapping);
   const settings = useRadar((s) => s.settings);
   const update = useRadar((s) => s.updateSettings);
   const calibrate = useRadar((s) => s.calibrateSonar);
@@ -73,12 +69,6 @@ function SonarPage() {
         }
       />
 
-      {dataMode === "demo" && sonar?.source === "twin" ? (
-        <p className="rounded-lg bg-warn/10 px-3 py-2 text-xs text-warn">
-          当前显示的是演示模式的模拟回波（场景射线）。点「发射脉冲」会真正使用扬声器与麦克风测量。
-        </p>
-      ) : null}
-
       {failed ? (
         <Card className="border-warn/30 bg-warn/5">
           <p className="text-sm text-warn">{failed.message}</p>
@@ -90,7 +80,12 @@ function SonarPage() {
       ) : null}
 
       <div className="grid grid-cols-2 gap-2 lg:grid-cols-6">
-        <Metric label="距离" value={formatMeters(sonar?.distM ?? null)} accent={real} hint={real ? "真实测量" : sonar ? "模拟" : "—"} />
+        <Metric
+          label="距离"
+          value={formatMeters(sonar?.distM ?? null)}
+          accent={real}
+          hint={real ? "真实测量" : "按「发射脉冲」测量"}
+        />
         <Metric label="置信度" value={sonar ? `${(sonar.confidence * 100).toFixed(0)}%` : "—"} />
         <Metric label="回波 SNR" value={sonar && sonar.status === "ok" ? `${sonar.snrDb.toFixed(1)} dB` : "—"} />
         <Metric label="直达声 SNR" value={lastReal ? `${lastReal.directSnrDb.toFixed(0)} dB` : "—"} hint="喇叭→麦克风" />
@@ -226,20 +221,6 @@ function SonarPage() {
               <CardHint>每次有效脉冲</CardHint>
             </CardHeader>
             <Wave data={sonarHist} stroke="var(--color-live)" unit="m" xLabel={`最近 ${sonarHist.length} 次`} />
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>合成孔径 SAR</CardTitle>
-              <CardHint>δ = λR / 2L</CardHint>
-            </CardHeader>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <Metric label="孔径 L" value={`${sar.L.toFixed(2)} m`} hint={mapping ? "PDR 轨迹" : "开始建图并走动"} />
-              <Metric label="斜距 R" value={`${sar.R.toFixed(2)} m`} />
-              <Metric label="方位分辨率 δ" value={`${(sar.delta * 100).toFixed(1)} cm`} />
-              <Metric label="轨迹" value={`${trajLen.toFixed(2)} m`} />
-            </div>
-            <p className="mt-3 text-xs text-muted">这只是解析分辨率上界（λ ≈ {(sar.lambda * 100).toFixed(1)} cm）。PDR 轨迹误差远大于波长，无法做相干合成，因此本站不做成像。</p>
           </Card>
         </div>
       </div>

@@ -1,4 +1,4 @@
-import { type Infer, bool, num, obj, oneOf } from "./schema.ts";
+import { type Infer, bool, num, obj, oneOf, str } from "./schema.ts";
 
 export const SETTINGS_KEY = "aether-settings-v2";
 export const LEGACY_SETTINGS_KEY = "aether-v18-settings";
@@ -8,9 +8,7 @@ const KIND_DEFAULT = { person: true, object: true, wall: true, free: true, traj:
 
 export const SettingsSchema = obj({
   version: num({ def: 2 }),
-  dataMode: oneOf(["demo", "real"] as const, "demo"),
   envManual: oneOf(["auto", ...envMode.options] as const, "auto"),
-  mapDensity: num({ min: 0.3, max: 3, def: 1 }),
   personOnly: bool(false),
   contourOn: bool(true),
   nightVision: bool(false),
@@ -36,6 +34,8 @@ export const SettingsSchema = obj({
   heightM: num({ min: 1, max: 2.3, def: 1.7 }),
   stepLengthM: num({ min: 0.3, max: 1.2, def: 0.7 }),
   cameraHeightM: num({ min: 0.3, max: 2.2, def: 1.35 }),
+  // Termux bridge: ws://127.0.0.1:PORT/ws?token=… ("" = not configured). Stays on this device (localStorage) and is never exported.
+  bridgeUrl: str({ max: 300, def: "" }),
 });
 
 export type Settings = Infer<typeof SettingsSchema>;

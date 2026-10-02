@@ -22,7 +22,7 @@ function CommandPage() {
   const cloudCounts = useRadar((s) => s.cloudCounts);
   const mapping = useRadar((s) => s.mapping);
   const cameraOn = useRadar((s) => s.cameraOn);
-  const dataMode = useRadar((s) => s.dataMode);
+  const bridge = useRadar((s) => s.bridge.status);
   const sensors = useRadar((s) => s.sensors);
   const rssiHist = useRadar((s) => s.rssiHist);
   const magHist = useRadar((s) => s.magHist);
@@ -40,7 +40,6 @@ function CommandPage() {
   const fusion = useRadar((s) => s.fusion);
   const fused = useRadar((s) => s.fused);
   const exploredM2 = useRadar((s) => s.exploredM2);
-  const objects = useRadar((s) => s.objects);
   const select = useRadar((s) => s.select);
   const selectedId = useRadar((s) => s.selectedId);
   const pose = useRadar((s) => s.pose);
@@ -48,17 +47,21 @@ function CommandPage() {
   const trajLen = useRadar((s) => s.trajLen);
 
   const points = Object.values(cloudCounts).reduce((a, b) => a + b, 0);
-  const demo = dataMode === "demo";
 
   return (
     <div className="grid h-full min-h-[calc(100dvh-52px)] grid-cols-1 lg:grid-cols-[1fr_360px]">
       <section className="relative min-h-[380px]">
         <RadarCanvas className="absolute inset-0" />
         <div className="pointer-events-none absolute inset-x-4 top-4 flex flex-wrap gap-2">
-          <Badge tone={demo ? "warn" : "real"}>{demo ? "演示数据" : "真实模式"}</Badge>
           <Badge tone={cameraOn ? "real" : "mute"}>{cameraOn ? "相机已接入" : "相机未开"}</Badge>
-          <Badge tone={wifi.throughWall ? "warn" : "mute"}>
-            {wifi.source === "none" ? "无 Wi-Fi 通道" : wifi.throughWall ? "链路扰动（模拟）" : "视距链路（模拟）"}
+          <Badge tone={wifi.disturbed ? "warn" : wifi.source === "device" ? "real" : "mute"}>
+            {wifi.source === "none"
+              ? bridge === "live"
+                ? "Wi-Fi 等待读数"
+                : "无 Wi-Fi 通道"
+              : wifi.disturbed
+                ? "Wi-Fi 链路扰动"
+                : "Wi-Fi 链路平稳"}
           </Badge>
           <Badge tone="mute">{ENV_LABEL[env]}</Badge>
         </div>
@@ -75,11 +78,7 @@ function CommandPage() {
         <div className="stagger-in space-y-1">
           <p className="text-[11px] uppercase tracking-[0.18em] text-faint">Command</p>
           <h1 className="font-display text-2xl font-semibold tracking-tight">实时指挥台</h1>
-          <p className="text-sm text-muted">
-            {demo
-              ? "演示模式：真实传感器优先，缺失通道由孪生补位并标 DEMO。"
-              : "真实模式：只有真实设备数据；没有数据的通道显示「—」。"}
-          </p>
+          <p className="text-sm text-muted">只显示真实设备数据；没有读数的通道显示「—」。</p>
         </div>
 
         <div className="grid grid-cols-2 gap-2">
@@ -120,7 +119,11 @@ function CommandPage() {
           <Row
             k="Wi-Fi RSSI"
             v={Number.isFinite(wifi.rssi) ? `${wifi.rssi.toFixed(1)} dBm` : "—"}
-            sub={Number.isFinite(wifi.sigma) ? `σ ${wifi.sigma.toFixed(2)}` : "浏览器不开放 RSSI"}
+            sub={
+              Number.isFinite(wifi.sigma)
+                ? `σ ${wifi.sigma.toFixed(2)}${wifi.disturbed ? " · 扰动" : ""}`
+                : "浏览器读不到 RSSI，需 Termux 桥接"
+            }
             src={wifi.source}
           />
           <Row
@@ -137,9 +140,9 @@ function CommandPage() {
           />
           <Row
             k="航向"
-            v={sensors.orient.state === "live" || demo ? `${pose.headingDeg.toFixed(0)}°` : "—"}
+            v={sensors.orient.state === "live" ? `${pose.headingDeg.toFixed(0)}°` : "—"}
             sub={`俯仰 ${sensors.orient.state === "live" ? pose.pitchDeg.toFixed(0) + "°" : "—"}`}
-            src={sensors.orient.state === "live" ? "device" : demo ? "twin" : "none"}
+            src={sensors.orient.state === "live" ? "device" : "none"}
           />
           <Row
             k="PDR 步数"
@@ -163,7 +166,7 @@ function CommandPage() {
           <CardHeader>
             <CardTitle>波形</CardTitle>
           </CardHeader>
-          <Spark data={rssiHist} label="RSSI (模拟)" unit="dBm" />
+          <Spark data={rssiHist} label="Wi-Fi RSSI" unit="dBm" />
           <Spark data={magHist} stroke="var(--color-warn)" label="|B|" unit="μT" />
           <Spark data={sonarHist} label="声呐距离" unit="m" />
           <Spark data={fpsHist} stroke="var(--color-live)" label="主循环帧率" unit="Hz" />
@@ -215,12 +218,11 @@ function CommandPage() {
                       <div className="text-sm">{p.name}</div>
                       <div className="font-mono text-[11px] text-faint">
                         {p.pos.x.toFixed(1)}, {p.pos.z.toFixed(1)}
-                        {p.bpm ? ` · ${p.bpm.toFixed(0)} bpm（模拟）` : ` · ${(p.confidence * 100).toFixed(0)}%`}
+                        {` · ${(p.confidence * 100).toFixed(0)}%`}
                       </div>
                     </div>
                     <div className="flex items-center gap-1.5">
                       <SourceBadge source={p.source} />
-                      {p.source === "twin" ? <Badge tone={p.behindWall ? "warn" : "live"}>{p.behindWall ? "墙后" : "视距"}</Badge> : null}
                     </div>
                   </button>
                 </li>
@@ -231,28 +233,21 @@ function CommandPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle>{demo ? "场景物体（模拟）" : "视觉物体"}</CardTitle>
+            <CardTitle>视觉物体</CardTitle>
             <Link to="/map" className="text-xs text-accent hover:underline">
               建图
             </Link>
           </CardHeader>
           <ul className="space-y-1.5">
-            {demo
-              ? objects.slice(0, 6).map((o) => (
-                  <li key={o.id} className="flex items-center justify-between text-sm">
-                    <span>{o.name}</span>
-                    <span className="font-mono text-[11px] text-faint">{o.metal ? "金属" : o.kind}</span>
-                  </li>
-                ))
-              : detections
-                  .filter((d) => d.cls !== "person")
-                  .slice(0, 6)
-                  .map((d) => (
-                    <li key={d.id} className="flex items-center justify-between text-sm">
-                      <span>{d.cls}</span>
-                      <span className="font-mono text-[11px] text-faint">≈{d.depthM.toFixed(1)} m</span>
-                    </li>
-                  ))}
+            {detections
+              .filter((d) => d.cls !== "person")
+              .slice(0, 6)
+              .map((d) => (
+                <li key={d.id} className="flex items-center justify-between text-sm">
+                  <span>{d.cls}</span>
+                  <span className="font-mono text-[11px] text-faint">≈{d.depthM.toFixed(1)} m</span>
+                </li>
+              ))}
           </ul>
         </Card>
       </aside>

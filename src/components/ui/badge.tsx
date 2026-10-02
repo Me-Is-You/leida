@@ -12,7 +12,6 @@ const badgeVariants = cva(
         live: "bg-live/15 text-live",
         real: "bg-accent/20 text-accent",
         warn: "bg-warn/15 text-warn",
-        twin: "bg-raised text-faint",
       },
     },
     defaultVariants: { tone: "mute" },

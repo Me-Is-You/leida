@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { components, grayStats, iou, rgbaToGray, sauvola, textRegions } from "./imageops.ts";
 import { MotionDetector } from "./motion-detect.ts";
-import { mulberry32 } from "./math.ts";
+import { mulberry32 } from "./fixtures/prng.ts";
 
 test("rgbaToGray weights sum to 256 (white stays 255, black 0)", () => {
   const out = new Uint8Array(2);

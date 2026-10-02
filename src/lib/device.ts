@@ -424,13 +424,13 @@ export function probeCapabilities(): Capability[] {
       id: "wifi",
       label: "Wi-Fi RSSI API",
       available: false,
-      note: "浏览器不开放 RSSI · 物理孪生 + 原机 dumpsys",
+      note: "浏览器不开放 RSSI · 经 Termux 桥接读取（硬件页连接）",
     },
     {
       id: "csi",
       label: "Wi-Fi CSI",
       available: false,
-      note: "MediaTek 未开放 · 硬天花板",
+      note: "普通 Android 应用拿不到 CSI（需 root / 定制固件）· 不支持",
     },
     {
       id: "tof",

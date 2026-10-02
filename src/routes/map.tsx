@@ -5,8 +5,7 @@ import { PageHeader } from "@/components/panels/page-header";
 import { Metric } from "@/components/panels/metric";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardHeader, CardHint, CardTitle } from "@/components/ui/card";
-import { Slider } from "@/components/ui/slider";
+import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { cloud, useRadar } from "@/lib/radar-store";
 import type { MapPointKind, ViewPreset } from "@/lib/types";
@@ -35,9 +34,6 @@ function MapPage() {
   const toggleMapping = useRadar((s) => s.toggleMapping);
   const clearMap = useRadar((s) => s.clearMap);
   const trajectory = useRadar((s) => s.trajectory);
-  const mapDensity = useRadar((s) => s.settings.mapDensity);
-  const updateSettings = useRadar((s) => s.updateSettings);
-  const dataMode = useRadar((s) => s.dataMode);
   const meshOn = useRadar((s) => s.meshOn);
   const setMesh = useRadar((s) => s.setMesh);
   const exploredM2 = useRadar((s) => s.exploredM2);
@@ -63,7 +59,7 @@ function MapPage() {
         <RadarCanvas className="absolute inset-0" />
         <div className="pointer-events-none absolute left-4 top-4 flex flex-wrap gap-2">
           <Badge tone={mapping ? "live" : "mute"}>{mapping ? "建图中" : "空闲"}</Badge>
-          <Badge tone={dataMode === "demo" ? "warn" : "real"}>{dataMode === "demo" ? "演示数据" : "真实"}</Badge>
+          <Badge tone="real">真实</Badge>
           <Badge tone="mute">{total} 点</Badge>
         </div>
       </section>
@@ -125,7 +121,11 @@ function MapPage() {
           <Metric label="点云" value={String(total)} hint="去重后" />
           <Metric label="航迹" value={`${trajLen.toFixed(1)} m`} hint={`${steps} 步 · ${trajectory.length} 点`} />
           <Metric label="已探索" value={`${exploredM2.toFixed(1)} m²`} hint="栅格有证据的面积" />
-          <Metric label="定向" value={dataMode === "demo" || orientLive ? "罗盘" : "无"} hint={orientLive ? "" : "没有罗盘时只能朝 0°"} />
+          <Metric
+            label="定向"
+            value={orientLive ? "罗盘" : "无"}
+            hint={orientLive ? "" : "没有罗盘时只能朝 0°"}
+          />
         </div>
 
         <Card>
@@ -139,14 +139,6 @@ function MapPage() {
               </Button>
             ))}
           </div>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>演示密度</CardTitle>
-            <CardHint>{mapDensity.toFixed(1)}×</CardHint>
-          </CardHeader>
-          <Slider min={0.3} max={3} step={0.1} value={[mapDensity]} onValueChange={(v) => updateSettings({ mapDensity: v[0] ?? 1 })} />
         </Card>
 
         <Card>

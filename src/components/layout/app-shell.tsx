@@ -18,8 +18,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return () => stop();
   }, [start, stop]);
 
-  const demo = useRadar((s) => s.dataMode === "demo");
-
   return (
     <div className="flex min-h-dvh flex-col bg-bg text-fg lg:flex-row">
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-50 focus:rounded-md focus:bg-raised focus:px-3 focus:py-2 focus:text-sm">
@@ -71,13 +69,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <StatusStrip />
         </header>
 
-        {demo ? (
-          <div className="border-b border-warn/25 bg-warn/10 px-4 py-1.5 text-[11px] text-warn">
-            演示模式：带 <b>DEMO</b> 标记的人物 / 物体 / Wi-Fi / 声呐为模拟数据。要看真实传感器，请点右上角切换到「真实模式」。
-          </div>
-        ) : null}
-
-        <main id="main" tabIndex={-1} className="relative min-h-0 outline-none flex-1 overflow-auto pb-20 lg:pb-0">{children}</main>
+        <main
+          id="main"
+          tabIndex={-1}
+          className="relative min-h-0 outline-none flex-1 overflow-auto pb-20 lg:pb-0"
+        >
+          {children}
+        </main>
 
         <nav aria-label="底部导航" className="fixed inset-x-0 bottom-0 z-30 flex gap-1 overflow-x-auto border-t border-line bg-surface/95 px-2 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] backdrop-blur-sm lg:hidden">
           {NAV.map((item) => {
@@ -121,25 +119,43 @@ const StatusStrip = memo(function StatusStrip() {
   const clock = useRadar((s) => s.clock);
   const fps = useRadar((s) => Math.round(s.fps));
   const env = useRadar((s) => s.env);
-  const dataMode = useRadar((s) => s.dataMode);
-  const setDataMode = useRadar((s) => s.setDataMode);
+  const bridge = useRadar((s) => s.bridge.status);
   const enableSensors = useRadar((s) => s.enableSensors);
   const liveCount = useRadar((s) => Object.values(s.sensors).filter((x) => x.state === "live").length);
   const total = useRadar((s) => Object.keys(s.sensors).length);
-  const demo = dataMode === "demo";
   return (
     <div className="ml-auto flex flex-wrap items-center gap-2 text-[11px]">
+      <Link
+        to="/hardware"
+        title="Termux 桥接：为浏览器读取 Wi-Fi RSSI（网页自己读不到）。点击进入设置"
+        className={cn(
+          "flex items-center gap-1.5 rounded-full px-2.5 py-1 font-medium",
+          bridge === "live"
+            ? "bg-accent/20 text-accent"
+            : bridge === "error"
+              ? "bg-warn/20 text-warn"
+              : "bg-raised text-muted",
+        )}
+      >
+        <span
+          className={cn(
+            "size-1.5 rounded-full",
+            bridge === "live" ? "bg-accent" : bridge === "error" ? "bg-warn" : "bg-faint",
+          )}
+        />
+        {bridge === "live"
+          ? "Wi-Fi 桥接"
+          : bridge === "connecting"
+            ? "桥接连接中"
+            : bridge === "error"
+              ? "桥接断开"
+              : "Wi-Fi 桥接未连接"}
+      </Link>
       <button
         type="button"
-        onClick={() => setDataMode(demo ? "real" : "demo")}
-        aria-pressed={!demo}
-        title={demo ? "当前：演示数据（缺失通道由孪生补位）。点击切换到真实模式" : "当前：只显示真实设备数据。点击切换到演示模式"}
-        className={cn("flex items-center gap-1.5 rounded-full px-2.5 py-1 font-medium", demo ? "bg-warn/20 text-warn" : "bg-accent/20 text-accent")}
+        onClick={() => void enableSensors()}
+        className="rounded-full bg-raised px-2.5 py-1 text-muted hover:text-fg"
       >
-        <span className={cn("size-1.5 rounded-full", demo ? "bg-warn" : "bg-accent")} />
-        {demo ? "演示数据" : "真实模式"}
-      </button>
-      <button type="button" onClick={() => void enableSensors()} className="rounded-full bg-raised px-2.5 py-1 text-muted hover:text-fg">
         启用传感器
       </button>
       <Stat label="环境" value={env.toUpperCase()} />

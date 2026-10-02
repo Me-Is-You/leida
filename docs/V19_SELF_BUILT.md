@@ -37,3 +37,12 @@
 - **Tesseract 的字符识别**：保留；前后处理是自研的。
 - **zod**：仍在 package.json，因为平台文件 `src/lib/preview-host-bridge.ts` 使用它；业务代码已不再依赖。
 - **真机行为**：沙箱没有真实喇叭/麦克风/IMU，真机上的声呐精度、输出延迟、电量节省幅度需要在 X300 上复测。录音时长（0.55 s）没有自适应缩短，因为输出延迟未知。
+
+## v19.2 · 全部功能正式实现（删除演示模式）
+
+- 删除 `src/lib/engine.ts`（物理孪生）及全部 demo 分支：`DataMode`、`SampleSource "twin"`、模拟人物/呼吸率/物体/最近金属、演示密度、演示横幅与切换按钮。`mulberry32` 移到测试夹具，生产代码不再含任何伪随机数据源。
+- 删除没有真实输入的功能：合成孔径 SAR 卡片（`computeSar` 用 `?? 2 m` 当斜距，且 PDR 无法相干成像）、`nearestMetal`。
+- 新增 `core/wifi-change.ts`：Wi-Fi 环境扰动检测（每条链路/AP 快窗 + 慢基线 EMA，SD 下限 1.5 dB，|z|>2.5 或 σ>2.2·sd，2 次命中/5 次清除滞回，30 个稳定样本重学基线，漫游重置，≥3 个就绪 AP 且占比 ≥0.4 判整体扰动）。
+- 新增 `core/bridge-protocol.ts`（严格解析 + URL 校验）、`bridge.ts`（自动重连/心跳/失联看门狗）、`bridge/termux-bridge.mjs`（零依赖、只读、127.0.0.1、令牌 + Origin 白名单）。
+- 导入会话：旧版演示模拟器导出的文件（v18 或 `dataMode:"demo"`）会被拒绝并说明原因。
+- 环境权重只保留 `hardware.ts` 里的 `FUSION_MODES` 一份来源。

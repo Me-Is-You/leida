@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { analyticEnvelope, fft, findPeaks, renderChirp, speedOfSound, xcorr } from "./dsp.ts";
 import { aggregateEchoes, processEcho, type SonarParams } from "./sonar-core.ts";
-import { mulberry32 } from "./math.ts";
+import { mulberry32 } from "./fixtures/prng.ts";
 
 const FS = 48000;
 const BAND: [number, number] = [18000, 21500];

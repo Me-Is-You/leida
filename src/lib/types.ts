@@ -1,6 +1,5 @@
-/** device = real sensor/measurement, twin = simulated (demo), none = no data (shown as "—"). */
-export type SampleSource = "device" | "twin" | "none";
-export type DataMode = "demo" | "real";
+/** device = real sensor/measurement, none = no data (shown as "—"). */
+export type SampleSource = "device" | "none";
 export type EnvMode =
   | "indoor"
   | "outdoor"
@@ -20,7 +19,8 @@ export type ObjectKind =
   | "wall"
   | "vehicle"
   | "animal";
-export type SensorId = "camera" | "mic" | "imu" | "orient" | "mag" | "light" | "geo" | "bt";
+export type SensorId =
+  "camera" | "mic" | "imu" | "orient" | "mag" | "light" | "geo" | "bt" | "wifi";
 export interface SensorStatus {
   state: "off" | "pending" | "live" | "denied" | "unsupported" | "error";
   /** Measured readings per second. */
@@ -73,23 +73,10 @@ export interface PersonTrack {
   name: string;
   pos: Vec3;
   heading: number;
-  /** Breathing rate — only the demo twin has one; real tracks are null. */
-  bpm: number | null;
   confidence: number;
   source: SampleSource;
-  behindWall: boolean;
   heightM: number;
   cls: string;
-}
-
-export interface SceneObject {
-  id: string;
-  name: string;
-  kind: ObjectKind;
-  pos: Vec3;
-  size: Vec3;
-  metal: boolean;
-  rssiHint?: number;
 }
 
 export interface MapPoint {
@@ -163,7 +150,8 @@ export interface WifiSample {
   rssi: number;
   sigma: number;
   ssid: string;
-  throughWall: boolean;
+  /** Link (or surrounding APs) deviates from the learned baseline. Says the radio environment is disturbed, not what disturbs it. */
+  disturbed: boolean;
   source: SampleSource;
 }
 
@@ -201,13 +189,6 @@ export interface Alert {
   body: string;
 }
 
-export interface SarState {
-  L: number;
-  R: number;
-  delta: number;
-  lambda: number;
-}
-
 export interface VideoCaps {
   torch: boolean;
   zoomMin: number;
@@ -230,7 +211,7 @@ export const ENV_LABEL: Record<EnvMode, string> = {
   outdoor: "室外",
   lowlight: "暗光",
   bright: "强光",
-  through: "穿墙",
+  through: "无线扰动",
   noisy: "噪声",
   clutter: "杂乱",
 };

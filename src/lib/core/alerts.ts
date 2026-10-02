@@ -6,8 +6,8 @@ export interface AlertEvent {
 }
 
 export interface AlertInput {
-  /** Wi-Fi link disturbance (only available in demo/twin or when a source exists). */
-  throughWall?: boolean;
+  /** Wi-Fi link disturbance reported by the bridge-fed change detector. */
+  linkDisturbed?: boolean;
   magAnomaly?: boolean;
   magDeltaUt?: number;
   sonarM?: number | null;
@@ -57,8 +57,13 @@ export class AlertEngine {
 
   update(now: number, i: AlertInput): AlertEvent[] {
     const out: AlertEvent[] = [];
-    if (this.edge("through", !!i.throughWall, now)) {
-      out.push({ key: "through", tone: "warn", title: "链路扰动", body: "RSSI 方差升高，链路可能穿越障碍或被人体遮挡。" });
+    if (this.edge("through", !!i.linkDisturbed, now)) {
+      out.push({
+        key: "through",
+        tone: "warn",
+        title: "链路扰动",
+        body: "Wi-Fi RSSI 偏离了学到的基线：周围无线环境正被扰动（有人走动、门开合或手机被遮挡）。这不能说明墙后有人。",
+      });
     }
     if (this.edge("mag", !!i.magAnomaly, now)) {
       const d = i.magDeltaUt !== undefined ? `（Δ ${i.magDeltaUt.toFixed(1)} μT）` : "";

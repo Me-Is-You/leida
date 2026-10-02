@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardHint, CardTitle } from "@/components/ui/card";
 import { Wave } from "@/components/charts/trace";
 import { FUSION_MODES } from "@/lib/hardware";
-import { envWeights } from "@/lib/engine";
+import { envWeights } from "@/lib/core/env-weights.ts";
 import { useRadar } from "@/lib/radar-store";
 import { ENV_LABEL, type EnvMode } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -26,7 +26,6 @@ function EnvPage() {
   const nightVision = useRadar((s) => s.settings.nightVision);
   const hdr = useRadar((s) => s.settings.hdr);
   const updateSettings = useRadar((s) => s.updateSettings);
-  const dataMode = useRadar((s) => s.dataMode);
   const setNight = (v: boolean) => updateSettings({ nightVision: v });
   const setHdr = (v: boolean) => updateSettings({ hdr: v });
   const f = (v: number | null, d = 0) => (v === null ? "—" : v.toFixed(d));
@@ -88,7 +87,11 @@ function EnvPage() {
         <Card>
           <CardHeader>
             <CardTitle>光学状态</CardTitle>
-            <CardHint>{wifi.source === "none" ? "无 Wi-Fi 通道" : `σ ${wifi.sigma.toFixed(2)}（模拟）`}</CardHint>
+            <CardHint>
+              {wifi.source === "none"
+                ? "无 Wi-Fi 通道（需 Termux 桥接）"
+                : `RSSI ${wifi.rssi.toFixed(0)} dBm · σ ${Number.isFinite(wifi.sigma) ? wifi.sigma.toFixed(2) : "—"}`}
+            </CardHint>
           </CardHeader>
           <Wave data={brightHist} digits={0} xLabel="帧亮度 0–255" />
           <div className="mt-4 flex flex-wrap gap-2">
@@ -98,7 +101,11 @@ function EnvPage() {
             <Button size="sm" variant={hdr ? "accent" : "outline"} onClick={() => setHdr(!hdr)}>
               HDR {hdr ? "开" : "关"}
             </Button>
-            {dataMode === "demo" ? <Badge tone={wifi.throughWall ? "warn" : "mute"}>{wifi.throughWall ? "链路扰动（模拟）" : "视距（模拟）"}</Badge> : null}
+            {wifi.source === "device" ? (
+              <Badge tone={wifi.disturbed ? "warn" : "mute"}>
+                {wifi.disturbed ? "Wi-Fi 链路扰动" : "Wi-Fi 链路平稳"}
+              </Badge>
+            ) : null}
           </div>
           <ul className="mt-4 space-y-1 text-xs text-muted">
             {FUSION_MODES.map((m) => (

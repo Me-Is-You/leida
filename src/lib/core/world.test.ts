@@ -266,16 +266,23 @@ describe("settings", () => {
     return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), m };
   };
 
-  it("defaults are valid and demo mode is the default", () => {
-    assert.equal(DEFAULT_SETTINGS.dataMode, "demo");
+  it("defaults are valid; no bridge is configured and no demo flag exists", () => {
+    assert.equal(DEFAULT_SETTINGS.bridgeUrl, "");
     assert.equal(DEFAULT_SETTINGS.version, 2);
+    assert.equal("dataMode" in DEFAULT_SETTINGS, false);
   });
 
   it("salvages valid fields when one is corrupt", () => {
-    const s = parseSettings({ mapDensity: 99, personOnly: true, envManual: "lowlight" });
+    const s = parseSettings({
+      sonarMaxRangeM: 99,
+      personOnly: true,
+      envManual: "lowlight",
+      dataMode: "demo",
+    });
     assert.equal(s.personOnly, true);
     assert.equal(s.envManual, "lowlight");
-    assert.equal(s.mapDensity, DEFAULT_SETTINGS.mapDensity);
+    assert.equal(s.sonarMaxRangeM, DEFAULT_SETTINGS.sonarMaxRangeM);
+    assert.equal("dataMode" in s, false); // legacy key is dropped
   });
 
   it("migrates the v18 key and round-trips", () => {
@@ -289,8 +296,8 @@ describe("settings", () => {
   });
 
   it("tolerates garbage", () => {
-    assert.equal(loadSettings(mem({ [SETTINGS_KEY]: "{not json" })).dataMode, "demo");
-    assert.equal(loadSettings(null).dataMode, "demo");
+    assert.deepEqual(loadSettings(mem({ [SETTINGS_KEY]: "{not json" })), DEFAULT_SETTINGS);
+    assert.deepEqual(loadSettings(null), DEFAULT_SETTINGS);
   });
 });
 
@@ -306,21 +313,25 @@ describe("session schema", () => {
     assert.equal(r.ok, true);
   });
 
-  it("migrates legacy v18 exports as demo data and drops unknown kinds", () => {
-    const r = parseSession({
+  it("refuses simulator-generated files (legacy v18 and dataMode demo)", () => {
+    const legacy = parseSession({
       version: "18.0",
-      points: [
-        { x: 1, y: 1, z: 1, kind: "wall", t: 1 },
-        { x: 1, y: 1, z: 1, kind: "ufo", t: 1 },
-      ],
+      points: [{ x: 1, y: 1, z: 1, kind: "wall", t: 1 }],
       trajectory: [{ x: 0, y: 0, z: 0 }],
     });
-    assert.equal(r.ok, true);
-    if (r.ok) {
-      assert.equal(r.legacy, true);
-      assert.equal(r.data.dataMode, "demo");
-      assert.equal(r.data.points.length, 1);
-    }
+    assert.equal(legacy.ok, false);
+    if (!legacy.ok) assert.match(legacy.error, /模拟器/);
+    const demo = parseSession({
+      format: "aether-session",
+      version: 2,
+      dataMode: "demo",
+      points: [],
+    });
+    assert.equal(demo.ok, false);
+  });
+
+  it("accepts a v2 file without dataMode", () => {
+    assert.equal(parseSession({ format: "aether-session", version: 2, points: [] }).ok, true);
   });
 
   it("rejects NaN / malformed / hostile input with a message", () => {

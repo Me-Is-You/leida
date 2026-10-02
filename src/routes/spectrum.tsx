@@ -6,7 +6,6 @@ import { Spark } from "@/components/charts/spark";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardHint, CardTitle } from "@/components/ui/card";
-import { nearestMetal } from "@/lib/fusion";
 import { useRadar } from "@/lib/radar-store";
 import { Compass, MapPin, Radio } from "lucide-react";
 
@@ -21,7 +20,6 @@ function SpectrumPage() {
   const imu = useRadar((s) => s.imu);
   const geo = useRadar((s) => s.geo);
   const bt = useRadar((s) => s.bt);
-  const objects = useRadar((s) => s.objects);
   const pose = useRadar((s) => s.pose);
   const rssiHist = useRadar((s) => s.rssiHist);
   const magHist = useRadar((s) => s.magHist);
@@ -36,7 +34,6 @@ function SpectrumPage() {
   const trajLen = useRadar((s) => s.trajLen);
   const resetPdr = useRadar((s) => s.resetPdr);
   const stepLen = useRadar((s) => s.settings.stepLengthM);
-  const metal = objects.length ? nearestMetal({ x: pose.x, y: pose.heightM, z: pose.z }, objects) : null;
   const accel = Math.hypot(imu.ax, imu.ay, imu.az);
 
   return (
@@ -44,7 +41,7 @@ function SpectrumPage() {
       <PageHeader
         kicker="Spectrum"
         title="电磁与运动"
-        hint="磁力计嗅探铁磁物体，IMU 计步 + 罗盘做航迹推算。浏览器拿不到 Wi-Fi RSSI / CSI，所以真实模式下该通道显示「—」，演示模式的 Wi-Fi 为模拟。"
+        hint="磁力计嗅探铁磁物体，IMU 计步 + 罗盘做航迹推算。Wi-Fi RSSI 浏览器读不到，需通过 Termux 桥接接入；没有读数的通道显示「—」。"
         actions={
           <>
             <Button variant="outline" onClick={() => void enableSensors()}>
@@ -58,9 +55,32 @@ function SpectrumPage() {
       />
 
       <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
-        <Metric label="|B|" value={fmt(mag.mag, 1, "μT")} hint={Number.isFinite(mag.mag) ? (mag.anomaly ? "异常" : "背景") : sensors.mag.note || "未接入"} accent={mag.anomaly} />
-        <Metric label="ΔB" value={magBaseline !== null && Number.isFinite(mag.mag) ? `${(mag.mag - magBaseline).toFixed(1)} μT` : "—"} hint={magBaseline !== null ? `基线 ${magBaseline.toFixed(1)}` : ""} />
-        <Metric label="航向" value={sensors.orient.state === "live" || pose.source === "twin" ? `${pose.headingDeg.toFixed(0)}°` : "—"} hint={sensors.orient.note || (sensors.orient.state === "live" ? "罗盘" : "无读数")} />
+        <Metric
+          label="|B|"
+          value={fmt(mag.mag, 1, "μT")}
+          hint={
+            Number.isFinite(mag.mag)
+              ? mag.anomaly
+                ? "异常"
+                : "背景"
+              : sensors.mag.note || "未接入"
+          }
+          accent={mag.anomaly}
+        />
+        <Metric
+          label="ΔB"
+          value={
+            magBaseline !== null && Number.isFinite(mag.mag)
+              ? `${(mag.mag - magBaseline).toFixed(1)} μT`
+              : "—"
+          }
+          hint={magBaseline !== null ? `基线 ${magBaseline.toFixed(1)}` : ""}
+        />
+        <Metric
+          label="航向"
+          value={sensors.orient.state === "live" ? `${pose.headingDeg.toFixed(0)}°` : "—"}
+          hint={sensors.orient.note || (sensors.orient.state === "live" ? "罗盘" : "无读数")}
+        />
         <Metric label="步数" value={String(steps)} hint={`${trajLen.toFixed(1)} m`} />
         <Metric label="环境光" value={lightLux != null ? `${lightLux.toFixed(0)} lx` : "—"} hint={sensors.light.state === "live" ? "" : "传感器未接入"} />
       </div>
@@ -82,12 +102,6 @@ function SpectrumPage() {
             <Spark data={magZHist} stroke="var(--color-warn)" label="Z" unit="μT" />
             <Spark data={magHist} label="|B|" unit="μT" />
           </div>
-          {metal ? (
-            <p className="mt-3 text-sm">
-              最近金属（模拟场景） <span className="text-fg">{metal.name}</span>
-              <span className="ml-2 font-mono text-muted">{metal.dist.toFixed(2)} m</span>
-            </p>
-          ) : null}
           <p className="mt-3 text-xs text-muted">
             自适应基线 + 稳健 σ：偏离超过 max(3 μT, 4σ) 才报警，异常期间基线冻结，不会被金属“学走”。手机自身磁性/保护壳会抬高背景。
           </p>
@@ -100,22 +114,28 @@ function SpectrumPage() {
           </CardHeader>
           {wifi.source === "none" ? (
             <p className="text-sm text-muted">
-              网页无法读取 Wi-Fi RSSI 或 CSI（浏览器沙箱限制），所以这里没有真实数据。切换到演示模式可查看模拟的穿墙扰动。要真实 RSSI 需要 Android 原生/Termux 桥接。
+              没有 Wi-Fi 读数：网页无法读取 RSSI（浏览器沙箱限制）。在 Termux
+              里运行桥接并到「硬件」页连接后，这里显示真实 RSSI 与扰动检测。
             </p>
           ) : (
             <>
               <div className="grid grid-cols-3 gap-2">
                 <Axis k="RSSI" v={wifi.rssi} unit="dBm" ok />
-                <Axis k="σ" v={wifi.sigma} ok />
+                <Axis k="σ" v={wifi.sigma} unit="dB" ok={Number.isFinite(wifi.sigma)} />
                 <div className="rounded-md bg-raised px-2 py-2 text-center">
                   <div className="text-[10px] uppercase tracking-widest text-faint">状态</div>
-                  <Badge tone={wifi.throughWall ? "warn" : "mute"}>{wifi.throughWall ? "扰动" : "稳定"}</Badge>
+                  <Badge tone={wifi.disturbed ? "warn" : "mute"}>
+                    {wifi.disturbed ? "扰动" : "稳定"}
+                  </Badge>
                 </div>
               </div>
               <div className="mt-3">
-                <Wave data={rssiHist} unit="dBm" digits={1} xLabel="模拟数据" />
+                <Wave data={rssiHist} unit="dBm" digits={1} xLabel="RSSI（真实读数）" />
               </div>
-              <p className="mt-3 text-xs text-muted">路径损耗 + 墙体衰减 + 人体遮挡写入物理孪生；σ &gt; 2.5 判定扰动。</p>
+              <p className="mt-3 text-xs text-muted">
+                当前连接与周边 AP 的 RSSI 各自学习基线；偏离 &gt; 2.5σ
+                或短窗方差明显增大即判为扰动（需连续命中，防抖）。它只说明无线环境在变化，不能判断墙后有没有人。
+              </p>
             </>
           )}
         </Card>
