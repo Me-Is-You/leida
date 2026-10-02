@@ -1,0 +1,16 @@
+import { createFileRoute } from "@tanstack/react-router";
+import { PageHeader } from "@/components/panels/page-header";
+import { Metric, SourceBadge } from "@/components/panels/metric";
+import { LiveView } from "@/components/vision/live-view";
+import { Button } from "@/components/ui/button";
+import { Card, CardHeader, CardHint, CardTitle } from "@/components/ui/card";
+import { Slider } from "@/components/ui/slider";
+import { Switch } from "@/components/ui/switch";
+import { Spark } from "@/components/charts/spark";
+import { KIND_LABEL } from "@/lib/types";
+import { injectTesseract, runOcr } from "@/lib/vision";
+import { getCameraStream } from "@/lib/device";
+import { useRadar } from "@/lib/radar-store";
+import { formatMeters } from "@/lib/utils";
+import { Aperture, Flashlight, ScanText, SwitchCamera } from "lucide-react";
+import { useRef } from "react";

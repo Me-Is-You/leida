@@ -1,0 +1,21 @@
+node_modules/
+.vercel/
+.output/
+.tanstack/
+dist/
+build/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+# platform scaffolding / generated, not source
+.grok/*
+!.grok/app-env.json
+.node_modules.lock
+.project_id
+artifacts/
+attachments/
+# vendored at build time from node_modules (see vite.config.ts)
+public/vendor/
