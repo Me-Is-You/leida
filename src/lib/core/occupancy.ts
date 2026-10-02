@@ -76,6 +76,8 @@ export class OccupancyGrid {
    * reached max range without a return: all cells are free, none occupied.
    */
   integrateRay(ox: number, oz: number, hx: number, hz: number, hit = true) {
+    // a NaN/∞ coordinate would make the Bresenham loop spin 2000 steps and write garbage into cell (0,0)
+    if (!Number.isFinite(ox + oz + hx + hz)) return;
     const c = this.cell;
     const x0 = Math.floor(ox / c);
     const z0 = Math.floor(oz / c);
@@ -110,6 +112,7 @@ export class OccupancyGrid {
 
   /** Mark a point observation (e.g. visual detection) as occupied without a ray. */
   markOccupied(x: number, z: number) {
+    if (!Number.isFinite(x + z)) return;
     this.bump(Math.floor(x / this.cell), Math.floor(z / this.cell), this.lOcc);
     this.version++;
   }

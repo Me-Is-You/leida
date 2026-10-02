@@ -58,10 +58,26 @@ export function grayStats(gray: Uint8Array, w: number, prev: Uint8Array | null, 
  * from integral images. Returns a mask (1 = ink/foreground, i.e. darker than T)
  * — robust to uneven lighting where a global threshold fails.
  */
+let integral: Float64Array = new Float64Array(0);
+let integral2: Float64Array = new Float64Array(0);
+
 export function sauvola(gray: Uint8Array, w: number, h: number, win = 15, k = 0.34, R = 128): Uint8Array {
   const W = w + 1;
-  const I = new Float64Array(W * (h + 1));
-  const I2 = new Float64Array(W * (h + 1));
+  // integral images are reused between calls (≈11 MB at 960×720) so scanning every second does not churn the GC;
+  // only row 0 and column 0 need re-zeroing, every other cell is overwritten below
+  const need = W * (h + 1);
+  if (integral.length < need) {
+    integral = new Float64Array(need);
+    integral2 = new Float64Array(need);
+  }
+  const I = integral;
+  const I2 = integral2;
+  I.fill(0, 0, W);
+  I2.fill(0, 0, W);
+  for (let y = 0; y <= h; y++) {
+    I[y * W] = 0;
+    I2[y * W] = 0;
+  }
   for (let y = 0; y < h; y++) {
     let r = 0;
     let r2 = 0;

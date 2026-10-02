@@ -155,10 +155,15 @@ export async function pingSonar(cfg: SonarConfig): Promise<SonarPing> {
     const fs = g.ctx.sampleRate;
     // Pipeline: DSP of recording i runs in the worker while recording i+1 is captured.
     const jobs: Promise<EchoResult>[] = [];
-    for (let i = 0; i < cfg.average; i++) {
-      const rec = await timedAsync("sonar.record", () => recordOnce(g.ctx, g.node, cfg.gain));
-      jobs.push(processEchoAsync(rec, fs, cfg));
-      if (i < cfg.average - 1) await new Promise((r) => setTimeout(r, 120));
+    try {
+      for (let i = 0; i < cfg.average; i++) {
+        const rec = await timedAsync("sonar.record", () => recordOnce(g.ctx, g.node, cfg.gain));
+        jobs.push(processEchoAsync(rec, fs, cfg));
+        if (i < cfg.average - 1) await new Promise((r) => setTimeout(r, 120));
+      }
+    } catch (e) {
+      void Promise.allSettled(jobs); // already-started DSP jobs must not become unhandled rejections
+      throw e;
     }
     const results = await Promise.all(jobs);
     record("sonar.ping", performance.now() - tPing);

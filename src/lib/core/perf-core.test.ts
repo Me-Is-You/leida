@@ -193,3 +193,13 @@ test("OccupancyGrid hash table matches the Map-based reference (incl. growth)", 
   a.clear();
   assert.equal(a.explored().cells, 0);
 });
+
+import { OccupancyGrid as OccGridNaN } from "./occupancy.ts";
+test("OccupancyGrid ignores non-finite coordinates instead of corrupting cell (0,0)", () => {
+  const g = new OccGridNaN(0.25);
+  g.integrateRay(0, 0, Number.NaN, 3);
+  g.integrateRay(Number.POSITIVE_INFINITY, 0, 1, 1);
+  g.markOccupied(Number.NaN, 1);
+  assert.equal(g.explored().cells, 0);
+  assert.equal(g.version, 0);
+});

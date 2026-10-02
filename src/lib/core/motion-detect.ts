@@ -67,12 +67,10 @@ export class MotionDetector {
     const bg = this.bg;
     // signed difference + histograms for robust medians
     const hs = new Uint32Array(511);
-    const ha = new Uint32Array(256);
     for (let i = 0; i < n; i++) {
       const d = Math.round((gray[i] as number) - (bg[i] as number));
       diff[i] = d;
       hs[d + 255]!++;
-      ha[Math.min(255, Math.abs(d))]!++;
     }
     let acc = 0;
     let med = 0;
@@ -123,7 +121,6 @@ export class MotionDetector {
         if (c >= this.absorbAfter) {
           bg[i] = gray[i] as number;
           mask[i] = 0;
-          changed--;
         }
       } else still[i] = 0;
     }

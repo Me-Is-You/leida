@@ -27,13 +27,13 @@ interface Finder {
   n: number;
 }
 
-/** Checks a 5-run window against 1:1:3:1:1 and returns the unit size (or 0). */
-function ratioOk(r: number[]): number {
-  const total = r[0]! + r[1]! + r[2]! + r[3]! + r[4]!;
+/** Checks five run lengths against 1:1:3:1:1 and returns the unit size (or 0). No allocation: runs once per dark run of every image row. */
+function ratioOk(a: number, b: number, c: number, d: number, e: number): number {
+  const total = a + b + c + d + e;
   if (total < 7) return 0;
   const u = total / 7;
   const tol = u * 0.75;
-  if (Math.abs(r[0]! - u) < tol && Math.abs(r[1]! - u) < tol && Math.abs(r[2]! - 3 * u) < 3 * tol && Math.abs(r[3]! - u) < tol && Math.abs(r[4]! - u) < tol) return u;
+  if (Math.abs(a - u) < tol && Math.abs(b - u) < tol && Math.abs(c - 3 * u) < 3 * tol && Math.abs(d - u) < tol && Math.abs(e - u) < tol) return u;
   return 0;
 }
 
@@ -67,8 +67,7 @@ function crossCheck(bin: Uint8Array, w: number, h: number, x: number, y: number,
   const up = walk(-1);
   const down = walk(1);
   if (!up || !down) return null;
-  const run = [up[2]!, up[1]!, up[0]! + down[0]! - 1, down[1]!, down[2]!];
-  const u = ratioOk(run);
+  const u = ratioOk(up[2]!, up[1]!, up[0]! + down[0]! - 1, down[1]!, down[2]!);
   if (!u) return null;
   // centre of the middle run along the line
   const centre = (down[0]! - up[0]!) / 2;
@@ -96,8 +95,7 @@ export function findFinders(bin: Uint8Array, w: number, h: number): Finder[] {
     }
     for (let i = 0; i + 4 < lens.length; i++) {
       if (vals[i] !== 1) continue;
-      const run = [lens[i]!, lens[i + 1]!, lens[i + 2]!, lens[i + 3]!, lens[i + 4]!];
-      const u = ratioOk(run);
+      const u = ratioOk(lens[i]!, lens[i + 1]!, lens[i + 2]!, lens[i + 3]!, lens[i + 4]!);
       if (!u) continue;
       const cx = starts[i + 2]! + lens[i + 2]! / 2; // continuous centre of the middle run
       const px = Math.floor(cx);

@@ -66,7 +66,9 @@ export function createStore<T extends object>(init: (set: SetState<T>, get: GetS
       cache.current = { s: state, v, sel };
       return v;
     };
-    const serverSnap = () => sel(initial);
+    // getServerSnapshot must return a stable value: compute once per hook instance
+    const serverCache = useRef<{ v: U } | null>(null);
+    const serverSnap = () => (serverCache.current ??= { v: sel(initial) }).v;
     return useSyncExternalStore(subscribe, snap, serverSnap);
   }
   return Object.assign(useStore, { getState: get, setState: set, subscribe }) as UseStore<T>;
